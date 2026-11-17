@@ -35,6 +35,10 @@
     color:#fff; font-size:20px; font-weight:700; letter-spacing:.05em; cursor:pointer;
     box-shadow:0 4px 18px rgba(0,0,0,.6); transition:background .2s, transform .08s; touch-action:manipulation; }
   #power:active { transform:scale(.95); }
+  .seg { display:flex; border:1px solid rgba(255,255,255,.7); border-radius:16px; overflow:hidden; }
+  .seg button { flex:1; height:32px; border:0; background:transparent; color:#fff; font-size:13px; cursor:pointer;
+    touch-action:manipulation; }
+  .seg button.on { background:#fff; color:#000; font-weight:600; }
   #power.off { background:#222 !important; opacity:.75; }
 
   #start { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
@@ -55,6 +59,8 @@
 <div id="ui">
   <div class="row"><span>なめらか</span><input id="speed" type="range" min="0" max="1" step="0.001" value="0.3"><span>急激</span></div>
   <div class="row"><span>声部の数</span><input id="voices" type="range" min="1" max="5" step="1" value="3"><span id="vnum">3音</span></div>
+  <div class="row"><span>ビット粗さ</span><input id="crush" type="range" min="0" max="1" step="0.01" value="0"><span id="cnum">0%</span></div>
+  <div class="row"><span>音の選び方</span><div class="seg"><button id="modeHue" class="on">色相→音階</button><button id="modeChord">コード</button></div><span></span></div>
   <button id="power">ON</button>
 </div>
 
@@ -79,6 +85,10 @@ const ana = $("ana"); ana.width = AW; ana.height = AH;
 const actx2d = ana.getContext("2d", { willReadFrequently: true });
 const barsEl = $("bars"), powerBtn = $("power"), keyEl = $("key");
 const speedEl = $("speed"), voicesEl = $("voices"), vnum = $("vnum");
+const crushEl = $("crush"), cnum = $("cnum"), modeHueBtn = $("modeHue"), modeChordBtn = $("modeChord");
+let chordMode = false;   // false=色相→音階（従来）, true=コードの構成音
+let susOn = false;       // くすんだ画面で3度を抜いている状態（ヒステリシス付き）
+let chordLabel = "";
 
 let ac, master, gate, dryGain, wetGain, voices = [];
 let toneLP, revGain, sub, shimmer, lfo, lfoDepth;   // 白黒・くすみが和音の鳴り方を変えるための部品
@@ -147,6 +157,37 @@ const QUIRK = {
 const freqToMidi = f => Math.round(69 + 12 * Math.log2(f / 440));
 const midiToFreq = m => 440 * Math.pow(2, (m - 69) / 12);
 const colorEmotion = p => p.gray ? classify(0, false, p.val) : classify(p.hue / 360, true, p.val);
+
+/* ---------- コード方式：スケールの中で3度ずつ積んだ構成音 ---------- */
+const CHORD_ORDER = ['1', '5', '3', '7', '9'];   // 声部が増えるほどこの順に足す
+// 各構成音の候補（主音からの半音数）。スケールに含まれる最初の候補を使う。
+// 7音スケールなら1つおきに積んだ音と一致し、ペンタトニックやブルースでは近い代わりの音になる。
+function chordTones(steps, sus, airy) {
+  const has = s => steps.includes(((s % 12) + 12) % 12);
+  const pick = (cands, fb) => { for (const c of cands) if (has(c)) return c; return fb; };
+  let third = pick([4, 3], 4), susName = '';
+  if (sus) {   // くすんだ画面：3度を抜いて2度か4度へ（明るめ＝sus2、暗め＝sus4）
+    const s = pick(airy ? [2, 5] : [5, 2], null);
+    if (s !== null) { third = s; susName = s === 2 ? 'sus2' : 'sus4'; }
+  }
+  const fifth = pick([7, 6, 8], 7);
+  let ninth = pick([14, 13, 17], 14);
+  if ((ninth - third) % 12 === 0) ninth = fifth + 12;   // sus4 と11度が同じ音になるときは、5度の1オクターブ上で代用
+  return { '1': 0, '3': third, '5': fifth, '7': pick([10, 11, 9], 10), '9': ninth, susName };
+}
+// 鳴っている構成音からコード名を作る（表示用）
+function chordName(rootMidi, T, n) {
+  const roles = CHORD_ORDER.slice(0, n), on = r => roles.includes(r);
+  let s = NOTE_NAMES[rootMidi % 12];
+  if (n === 1) return s;
+  if (!on('3')) return s + (T['5'] === 7 ? '5' : '');
+  if (T.susName === '' && T['3'] === 3) s += 'm';
+  if (on('7')) s += T['7'] === 11 ? 'maj7' : T['7'] === 9 ? '6' : '7';
+  s += T.susName;
+  if (T['5'] === 6) s += '(♭5)'; else if (T['5'] === 8) s += '(♯5)';
+  if (on('9')) s += T['9'] === 14 ? '(9)' : T['9'] === 13 ? '(♭9)' : T['9'] === 17 ? '(11)' : '';
+  return s;
+}
 
 /* ---------- オーディオ ---------- */
 const TANH = (() => { const c = new Float32Array(1024); for (let k = 0; k < 1024; k++) c[k] = Math.tanh(3 * (k / 511.5 - 1)); return c; })();
@@ -382,7 +423,8 @@ function analyze() {
     if (now - keyCandSince >= hold) { key = { ...keyCand, hueRef: ordered[0].hue }; keyCand = null; }
   } else keyCand = null;
   if (rootSwitched) { key.hueRef = ordered[0].hue; rootSwitched = false; }
-  keyEl.textContent = `${key.emotion} · ${NOTE_NAMES[key.rootMidi % 12]} ${SCALES[key.scale].ja}`;
+  keyEl.textContent = `${key.emotion} · ${NOTE_NAMES[key.rootMidi % 12]} ${SCALES[key.scale].ja}` +
+    (chordMode && chordLabel ? ` ｜ ${chordLabel}` : '');
 
   /* グリッチ判定 */
   // 「何かが横切った」＝画面の一部だけが大きく変わったとき。
@@ -426,8 +468,10 @@ function updateAudio(ordered, abrupt) {
   const dt = TICK / 1000;
 
   // ビットクラッシュの量とその減衰
-  wetGain.gain.setTargetAtTime(glitch * 0.9, t, 0.02);
-  dryGain.gain.setTargetAtTime(1 - glitch * 0.7, t, 0.02);
+  // 常時の量（スライダー）＋グリッチの瞬間の量
+  const crush = clamp(+crushEl.value * 0.85 + glitch * 0.9, 0, 1);
+  wetGain.gain.setTargetAtTime(crush * 0.9, t, 0.02);
+  dryGain.gain.setTargetAtTime(1 - crush * 0.7, t, 0.02);
   glitch *= Math.exp(-dt / 0.25);
 
   const root = ordered[0];
@@ -458,16 +502,36 @@ function updateAudio(ordered, abrupt) {
   // くすみが多いほど全体の音色を丸く
   const soft = smooth(0.4, 0.95, scene.gray);
 
+  // コード方式：くすんだ画面ほど3度を抜く（境目でちらつかないよう、入る値と戻る値をずらす）
+  if (susOn ? soft < 0.45 : soft > 0.6) susOn = !susOn;
+  const tones = chordTones(steps, susOn, scene.mean > 0.5);
+  chordLabel = chordName(key.rootMidi, tones, voiceCount);
+
   const usedSemis = new Set();
   for (let i = 0; i < MAXV; i++) {
-    const v = voices[i], p = ordered[i];
+    const v = voices[i];
+    let p = ordered[i];
+    // コード方式では、色が足りなくても声部の数だけ構成音を鳴らす（主音の色を借りて小さめに）
+    if (!p && chordMode) p = { ...root, area: root.area * 0.15, borrowed: true };
     v.jitter *= Math.exp(-dt / 2.0);           // ゆっくり元のドローンへ
     let target = 0;
     if (p && i < voiceCount) {
-      // 音の高さ：主音の色からの色相のずれを、スケール（2オクターブ）の中の位置に当てはめる。
-      // 似た色は主音やそのオクターブの近くに、離れた色ほどスケールの上の方へ。
       let semis = 0, cents = 0;
-      if (i > 0) {
+      if (i > 0 && chordMode) {
+        // 構成音は声部の順番で決まる（1→5→3→7→9）。
+        // 色相のずれはオクターブの位置（ボイシング）に使う：
+        // 主音の色に近い＝そのまま密集、色相環で時計回りに遠い＝1オクターブ上、反時計回りに遠い＝1オクターブ下
+        semis = tones[CHORD_ORDER[i]];
+        const dh = p.borrowed ? 0 : wrap180(p.hue - root.hue) / 120;
+        if (v.oct === undefined) v.oct = 0;
+        if (Math.abs(dh - v.oct) > 0.6) v.oct = clamp(Math.round(dh), -1, 1);
+        semis += 12 * v.oct;
+        if (p.val < 0.25 && !p.borrowed) semis -= 12;   // とても暗い色は1オクターブ下
+        semis = clamp(semis, -12, 26);
+        while (usedSemis.has(semis)) semis += 12;      // 同じ音になったら1オクターブ上へ
+      } else if (i > 0) {
+        // 色相→音階：主音の色からの色相のずれを、スケール（2オクターブ）の中の位置に当てはめる。
+        // 似た色は主音やそのオクターブの近くに、離れた色ほどスケールの上の方へ。
         const x = ((p.hue - root.hue + 360) % 360) / 360 * range;
         let k = Math.floor(x + 0.5);
         cents = (x - k) * 40;                    // 隣の音へ近づくほど少しだけ引っぱられる（±20セント）
@@ -582,6 +646,14 @@ function render() {
 }
 
 /* ---------- 操作 ---------- */
+crushEl.addEventListener("input", () => { cnum.textContent = Math.round(crushEl.value * 100) + "%"; });
+function setMode(chord) {
+  chordMode = chord;
+  modeHueBtn.classList.toggle("on", !chord);
+  modeChordBtn.classList.toggle("on", chord);
+}
+modeHueBtn.addEventListener("click", () => setMode(false));
+modeChordBtn.addEventListener("click", () => setMode(true));
 voicesEl.addEventListener("input", () => {
   voiceCount = +voicesEl.value;
   vnum.textContent = voiceCount + "音";
