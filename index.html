@@ -19,6 +19,8 @@
   .bar.root { height:9px; box-shadow:0 0 8px rgba(255,255,255,.8); }
   .bar.root::after { content:"♪"; position:absolute; right:-14px; top:-5px; font-size:12px; }
   .bar.muted { opacity:.3; }
+  #key { position:fixed; right:12px; top:calc(env(safe-area-inset-top) + 8px); font-size:13px;
+    text-shadow:0 1px 3px #000; pointer-events:none; opacity:.9; }
   .bar.achro { margin-top:4px; outline:1px solid rgba(255,255,255,.35); }
 
   /* 操作パネル */
@@ -48,6 +50,7 @@
 <canvas id="ana"></canvas>
 
 <div id="bars"></div>
+<div id="key"></div>
 
 <div id="ui">
   <div class="row"><span>なめらか</span><input id="speed" type="range" min="0" max="1" step="0.001" value="0.3"><span>急激</span></div>
@@ -74,7 +77,7 @@ const view = $("view"), vctx = view.getContext("2d");
 const video = $("video");
 const ana = $("ana"); ana.width = AW; ana.height = AH;
 const actx2d = ana.getContext("2d", { willReadFrequently: true });
-const barsEl = $("bars"), powerBtn = $("power");
+const barsEl = $("bars"), powerBtn = $("power"), keyEl = $("key");
 const speedEl = $("speed"), voicesEl = $("voices"), vnum = $("vnum");
 
 let ac, master, gate, dryGain, wetGain, voices = [];
@@ -100,19 +103,53 @@ const lerp = (a, b, t) => a + (b - a) * t;
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
 const smooth = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
 
-/* ---------- 色相差 → 音程（半音、連続値） ----------
-   近い色ほど協和（オクターブ・5度・4度・3度）、補色に近いほど不協和（短2度・増4度・長7度） */
-const ANCHORS = [[0,12],[25,7],[50,5],[75,4],[100,9],[125,3],[145,10],[160,11],[170,13],[180,6]];
-function hueDiffToSemis(d) {
-  d = Math.abs(d);
-  for (let i = 1; i < ANCHORS.length; i++) {
-    const [x1, y1] = ANCHORS[i], [x0, y0] = ANCHORS[i - 1];
-    if (d <= x1) return lerp(y0, y1, (d - x0) / (x1 - x0));
+/* ---------- 色 → 感情 → 調（Color Sound Generator Version 10 のルールを踏襲） ---------- */
+const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const SCALES = {
+  major:            { steps: [0, 2, 4, 5, 7, 9, 11], ja: 'メジャー' },
+  minor:            { steps: [0, 2, 3, 5, 7, 8, 10], ja: 'マイナー' },
+  pentatonic_major: { steps: [0, 2, 4, 7, 9],        ja: 'メジャー・ペンタトニック' },
+  pentatonic_minor: { steps: [0, 3, 5, 7, 10],       ja: 'マイナー・ペンタトニック' },
+  blues:            { steps: [0, 3, 5, 6, 7, 10],    ja: 'ブルース' }
+};
+// h は 0〜1。chroma=false のときは無彩色として明るさで分類
+function classify(h, chroma, v) {
+  if (!chroma) {
+    if (v > 0.8) return { emotion: 'Clarity', baseFreq: 650, scale: 'major' };
+    if (v < 0.2) return { emotion: 'Depth', baseFreq: 120, scale: 'minor' };
+    return { emotion: 'Neutral', baseFreq: 200 + v * 250, scale: v > 0.6 ? 'pentatonic_major' : 'pentatonic_minor' };
   }
-  return 6;
+  if (h < 0.05 || h >= 0.95) return { emotion: 'Passion', baseFreq: 550 + v * 100, scale: v > 0.5 ? 'major' : 'blues' };
+  if (h < 0.15) return { emotion: 'Warmth', baseFreq: 500 + v * 100, scale: 'major' };
+  if (h < 0.25) return { emotion: 'Joy', baseFreq: 480 + v * 120, scale: 'pentatonic_major' };
+  if (h < 0.35) return { emotion: 'Freshness', baseFreq: 450 + v * 100, scale: 'major' };
+  if (h < 0.45) return { emotion: 'Peace', baseFreq: 400 + v * 100, scale: v > 0.5 ? 'pentatonic_major' : 'pentatonic_minor' };
+  if (h < 0.55) return { emotion: 'Calm', baseFreq: 350 + v * 100, scale: v > 0.6 ? 'major' : 'minor' };
+  if (h < 0.70) return { emotion: 'Melancholy', baseFreq: 300 + v * 100, scale: 'minor' };
+  if (h < 0.85) return { emotion: 'Mystery', baseFreq: 280 + v * 120, scale: 'blues' };
+  return { emotion: 'Creativity', baseFreq: 600 + v * 150, scale: v > 0.5 ? 'major' : 'minor' };
 }
+// 感情ごとの音の「くせ」。ドローン向けに、量だけを切り替えて連続的に変化させる
+const QUIRK = {
+  Clarity:    { partial: 0.25 },                       // きらめく倍音
+  Depth:      {},                                       // （ノイズは使わない方針）
+  Neutral:    {},                                       // くせなし
+  Passion:    { drive: 1 },                             // 熱い歪み
+  Warmth:     { chorus: 1 },                            // 厚みのあるコーラス
+  Joy:        { vibRate: 6.5, vib: 12 },                // 明るく速い揺らぎ
+  Freshness:  { partial: 0.15 },                        // はじける倍音
+  Peace:      { tremRate: 1.8, trem: 0.3 },             // おだやかな音量の揺れ
+  Calm:       { tremRate: 0.5, trem: 0.45 },            // ゆったりした揺れ
+  Melancholy: { vibRate: 4.5, vib: 14 },                // 憂いのあるビブラート
+  Mystery:    { vibRate: 0.7, vib: 35, fmodRate: 0.4, fmod: 0.6 },  // 深くゆっくりうねる
+  Creativity: { fm: 0.8 }                               // 金属的なFMの響き
+};
+const freqToMidi = f => Math.round(69 + 12 * Math.log2(f / 440));
+const midiToFreq = m => 440 * Math.pow(2, (m - 69) / 12);
+const colorEmotion = p => p.gray ? classify(0, false, p.val) : classify(p.hue / 360, true, p.val);
 
 /* ---------- オーディオ ---------- */
+const TANH = (() => { const c = new Float32Array(1024); for (let k = 0; k < 1024; k++) c[k] = Math.tanh(3 * (k / 511.5 - 1)); return c; })();
 function crushCurve(bits) {
   const n = 4096, c = new Float32Array(n), steps = Math.pow(2, bits);
   for (let i = 0; i < n; i++) { const x = i / (n - 1) * 2 - 1; c[i] = Math.round(x * steps) / steps; }
@@ -163,10 +200,37 @@ function initAudio() {
     ga.gain.value = 1; gb.gain.value = 0;
     const f = ac.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = 800;
     const g = ac.createGain(); g.gain.value = 0;
-    a.connect(ga).connect(f); b.connect(gb).connect(f); f.connect(g).connect(bus);
+    a.connect(ga).connect(f); b.connect(gb).connect(f);
     lfoDepth.connect(a.detune); lfoDepth.connect(b.detune);
     a.start(); b.start();
-    voices.push({ a, b, ga, gb, f, g, jitter: 0 });
+
+    /* 感情のくせ：部品は最初に全部つないでおき、量だけを感情に合わせて変える */
+    const lfoOsc = (rate) => { const o = ac.createOscillator(); o.frequency.value = rate; o.start(); return o; };
+    const amt = (v = 0) => { const x = ac.createGain(); x.gain.value = v; return x; };
+    // 歪み（Passion）：きれいな経路と歪んだ経路を混ぜる
+    const trem = amt(1), clean = amt(1), pre = amt(0.6), drive = amt(0);
+    const shaper = ac.createWaveShaper(); shaper.curve = TANH;
+    f.connect(clean).connect(trem);
+    f.connect(pre).connect(shaper).connect(drive).connect(trem);
+    trem.connect(g).connect(bus);
+    // ビブラート（Joy / Melancholy / Mystery）
+    const vib = lfoOsc(5), vibD = amt(); vib.connect(vibD); vibD.connect(a.detune); vibD.connect(b.detune);
+    // トレモロ（Peace / Calm）
+    const tr = lfoOsc(1), trD = amt(); tr.connect(trD).connect(trem.gain);
+    // フィルターのうねり（Mystery）
+    const fl = lfoOsc(0.4), flD = amt(); fl.connect(flD).connect(f.frequency);
+    // コーラス（Warmth）：少しずらしたノコギリ波を2本
+    const chG = amt();
+    const c1 = ac.createOscillator(), c2 = ac.createOscillator();
+    c1.type = c2.type = "sawtooth"; c1.detune.value = -9; c2.detune.value = 9;
+    c1.connect(chG); c2.connect(chG); chG.connect(f); c1.start(); c2.start();
+    // FM（Creativity）
+    const mod = lfoOsc(440), fmD = amt(); mod.connect(fmD); fmD.connect(a.frequency); fmD.connect(b.frequency);
+    // 倍音（Clarity / Freshness）：フィルターを通さず足す
+    const p2 = lfoOsc(440), pG = amt(); p2.connect(pG).connect(trem);
+
+    voices.push({ a, b, ga, gb, f, g, jitter: 0,
+      q: { trem, clean, drive, vib, vibD, tr, trD, fl, flD, c1, c2, chG, mod, fmD, p2, pG } });
   }
 }
 function mkSine() {
@@ -201,7 +265,8 @@ const H = new Float32Array(BINS), Ssum = new Float32Array(BINS), Vsum = new Floa
 const scene = { dark: 0, bright: 0, gray: 0, mean: 0.5, contrast: 0 };
 let satRef = 0.3;   // この画面で「鮮やか」とみなす彩度（画面ごとに自動で決まる）
 let prevLum = null;
-let rootHue = null, rootUnwrapped = 0;
+let rootHue = null, rootSwitched = false;
+let key = null, keyCand = null, keyCandSince = 0;   // 今の調と、切り替え候補の調
 let glitch = 0, glitchVis = 0, lastGlitchAt = 0;
 let lastPeaks = [], rootIdx = 0;
 
@@ -293,19 +358,33 @@ function analyze() {
     const top = peaks[0];
     if (!inc || (top !== inc && top.area > inc.area * (1 + margin))) {
       root = top;
-      rootUnwrapped = top.hue;                  // 転調：新しい主音へ
+      rootSwitched = true;                       // 主音の色が入れ替わった
     } else {
       root = inc;
-      rootUnwrapped += wrap180(inc.hue - rootHue);  // 同じ主音のまま色が流れる
-      if (rootUnwrapped < -120 || rootUnwrapped > 480) rootUnwrapped = inc.hue;
     }
     rootHue = root.hue;
   }
-  const ordered = root ? [root, ...peaks.filter(p => p !== root)] : [];
+  // 色が見つからない（ほぼ白黒・グレーだけの）画面では、無彩色の1音を主音にする
+  const ordered = root ? [root, ...peaks.filter(p => p !== root)]
+                       : [{ hue: 0, sat: 0, val: scene.mean, area: 1, gray: true }];
   lastPeaks = peaks; rootIdx = peaks.indexOf(root);
+  const now = performance.now();
+
+  /* 調の決定：主音の色の感情 → スケールと主音（C4〜B4）。
+     感情の境目で調がちらつかないよう、新しい調が一定時間続いたら転調する */
+  const dom = colorEmotion(ordered[0]);
+  const rootMidi = 60 + (((freqToMidi(dom.baseFreq) - 60) % 12) + 12) % 12;
+  const sig = dom.emotion + "/" + dom.scale + "/" + rootMidi;
+  const hold = lerp(1500, 0, abrupt);
+  if (!key) key = { ...dom, rootMidi, sig, hueRef: ordered[0].hue };
+  else if (sig !== key.sig) {
+    if (!keyCand || keyCand.sig !== sig) { keyCand = { ...dom, rootMidi, sig }; keyCandSince = now; }
+    if (now - keyCandSince >= hold) { key = { ...keyCand, hueRef: ordered[0].hue }; keyCand = null; }
+  } else keyCand = null;
+  if (rootSwitched) { key.hueRef = ordered[0].hue; rootSwitched = false; }
+  keyEl.textContent = `${key.emotion} · ${NOTE_NAMES[key.rootMidi % 12]} ${SCALES[key.scale].ja}`;
 
   /* グリッチ判定 */
-  const now = performance.now();
   // 「何かが横切った」＝画面の一部だけが大きく変わったとき。
   // カメラ自体を動かして画面全体が変わったとき（changedFrac が大きい）はグリッチを抑える。
   const panSuppress = clamp((0.8 - changedFrac) / 0.35, 0, 1);
@@ -351,9 +430,12 @@ function updateAudio(ordered, abrupt) {
   dryGain.gain.setTargetAtTime(1 - glitch * 0.7, t, 0.02);
   glitch *= Math.exp(-dt / 0.25);
 
-  const f0 = 220 * Math.pow(2, rootUnwrapped / 360);   // 主音域 220〜440Hz（スマホのスピーカーで聞こえやすい帯域）
   const root = ordered[0];
   const norm = 1 / Math.sqrt(voiceCount);
+  // 調の主音（C4〜B4）。主音の色が少しずつ流れると、和音全体がわずかに揺らぐ（±25セント）
+  const steps = SCALES[key.scale].steps, len = steps.length, range = len * 2;
+  const rootDrift = root.gray ? 0 : clamp(wrap180(root.hue - key.hueRef) * 0.8, -25, 25);
+  const f0 = midiToFreq(key.rootMidi) * Math.pow(2, rootDrift / 1200);
 
   /* 白黒・くすみ → 和音の鳴り方 */
   const darkK = smooth(0.15, 0.6, scene.dark), brightK = smooth(0.1, 0.5, scene.bright);
@@ -376,13 +458,32 @@ function updateAudio(ordered, abrupt) {
   // くすみが多いほど全体の音色を丸く
   const soft = smooth(0.4, 0.95, scene.gray);
 
+  const usedSemis = new Set();
   for (let i = 0; i < MAXV; i++) {
     const v = voices[i], p = ordered[i];
     v.jitter *= Math.exp(-dt / 2.0);           // ゆっくり元のドローンへ
     let target = 0;
     if (p && i < voiceCount) {
-      const semis = i === 0 ? 0 : hueDiffToSemis(wrap180(p.hue - root.hue));
-      const freq = f0 * Math.pow(2, semis / 12);
+      // 音の高さ：主音の色からの色相のずれを、スケール（2オクターブ）の中の位置に当てはめる。
+      // 似た色は主音やそのオクターブの近くに、離れた色ほどスケールの上の方へ。
+      let semis = 0, cents = 0;
+      if (i > 0) {
+        const x = ((p.hue - root.hue + 360) % 360) / 360 * range;
+        let k = Math.floor(x + 0.5);
+        cents = (x - k) * 40;                    // 隣の音へ近づくほど少しだけ引っぱられる（±20セント）
+        const semiOf = j => 12 * Math.floor(j / len) + steps[j % len];
+        // 同じ音が重なったら、空いている隣の音へずらす（Generator の「隣の音へずらす」）
+        for (let d = 0; d <= range; d++) {
+          const j = k + (d % 2 ? Math.ceil(d / 2) : -d / 2);
+          if (j < 0 || j > range) continue;
+          if (!usedSemis.has(semiOf(j))) { k = j; break; }
+        }
+        semis = semiOf(k);
+        if (p.val < 0.25) semis -= 12;           // とても暗い色は1オクターブ下
+      }
+      usedSemis.add(semis);
+      const freq = f0 * Math.pow(2, semis / 12 + cents / 1200);
+      v.emotion = colorEmotion(p).emotion;
       const det = v.jitter;
       v.a.frequency.setTargetAtTime(freq, t, glide);
       v.b.frequency.setTargetAtTime(freq * 1.003, t, glide);
@@ -393,8 +494,27 @@ function updateAudio(ordered, abrupt) {
       const edge = sat * (1 - 0.7 * soft);
       v.ga.gain.setTargetAtTime(1 - 0.6 * edge, t, 0.15);
       v.gb.gain.setTargetAtTime(Math.pow(edge, 1.3) * 0.55, t, 0.15);
-      v.f.frequency.setTargetAtTime(Math.min(16000, freq * (1.5 + edge * 12)), t, 0.15);
+      const cutoff = Math.min(16000, freq * (1.5 + edge * 12));
+      v.f.frequency.setTargetAtTime(cutoff, t, 0.15);
       v.f.Q.setTargetAtTime(0.7 + edge * 5, t, 0.15);
+      // 感情のくせ（量は0.6秒かけて移り変わる）
+      const Q = QUIRK[v.emotion] || {}, q = v.q, T = 0.6;
+      q.vib.frequency.setTargetAtTime(Q.vibRate || 5, t, T);
+      q.vibD.gain.setTargetAtTime(Q.vib || 0, t, T);
+      q.tr.frequency.setTargetAtTime(Q.tremRate || 1, t, T);
+      q.trD.gain.setTargetAtTime((Q.trem || 0) / 2, t, T);
+      q.trem.gain.setTargetAtTime(1 - (Q.trem || 0) / 2, t, T);
+      q.drive.gain.setTargetAtTime((Q.drive || 0) * 0.8, t, T);
+      q.clean.gain.setTargetAtTime(1 - (Q.drive || 0) * 0.5, t, T);
+      q.fl.frequency.setTargetAtTime(Q.fmodRate || 0.4, t, T);
+      q.flD.gain.setTargetAtTime(cutoff * (Q.fmod || 0), t, T);
+      q.c1.frequency.setTargetAtTime(freq, t, glide);
+      q.c2.frequency.setTargetAtTime(freq, t, glide);
+      q.chG.gain.setTargetAtTime((Q.chorus || 0) * 0.15, t, T);
+      q.mod.frequency.setTargetAtTime(freq * 2, t, glide);
+      q.fmD.gain.setTargetAtTime(freq * 1.5 * (Q.fm || 0), t, T);
+      q.p2.frequency.setTargetAtTime(freq * 2, t, glide);
+      q.pG.gain.setTargetAtTime(Q.partial || 0, t, T);
       const areaW = i === 0 ? 1 : clamp(Math.sqrt(p.area / root.area), 0.25, 1);
       target = 0.34 * (0.3 + 0.7 * Math.pow(val, 1.2)) * areaW * norm;
     }
