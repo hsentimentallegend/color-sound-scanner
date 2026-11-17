@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>Color Sound Scanner</title>
+<style>
+  :root { --fg:#fff; --panel:rgba(0,0,0,.45); }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; height:100%; background:#000; color:var(--fg);
+    font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif; overflow:hidden; }
+  #view { position:fixed; inset:0; width:100%; height:100%; display:block; }
+  video, #ana { display:none; }
+
+  /* 主音争いバー（左端） */
+  #bars { position:fixed; left:0; top:calc(env(safe-area-inset-top) + 12px); width:42vw; max-width:260px;
+    display:flex; flex-direction:column; gap:6px; pointer-events:none; }
+  .bar { height:5px; border-radius:0 3px 3px 0; transition:width .08s linear; min-width:2px; position:relative; }
+  .bar.root { height:9px; box-shadow:0 0 8px rgba(255,255,255,.8); }
+  .bar.root::after { content:"♪"; position:absolute; right:-14px; top:-5px; font-size:12px; }
+  .bar.muted { opacity:.3; }
+
+  /* 操作パネル */
+  #ui { position:fixed; left:0; right:0; bottom:0; padding:12px 16px calc(env(safe-area-inset-bottom) + 16px);
+    display:flex; flex-direction:column; align-items:center; gap:12px;
+    background:linear-gradient(transparent, rgba(0,0,0,.6)); }
+  .row { width:100%; max-width:480px; display:grid; grid-template-columns:5.5em 1fr 4.5em; align-items:center; gap:8px;
+    font-size:13px; text-shadow:0 1px 2px #000; }
+  .row span:last-child { text-align:right; }
+  input[type=range] { width:100%; height:32px; accent-color:#fff; }
+  #power { width:96px; height:96px; border-radius:50%; border:3px solid #fff; background:#222;
+    color:#fff; font-size:20px; font-weight:700; letter-spacing:.05em; cursor:pointer;
+    box-shadow:0 4px 18px rgba(0,0,0,.6); transition:background .2s, transform .08s; touch-action:manipulation; }
+  #power:active { transform:scale(.95); }
+  #power.off { background:#222 !important; opacity:.75; }
+
+  #start { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:14px; background:#000; z-index:10; text-align:center; padding:24px; cursor:pointer; }
+  #start h1 { margin:0; font-size:26px; font-weight:600; letter-spacing:.04em; }
+  #start p { margin:0; opacity:.7; font-size:14px; line-height:1.6; }
+  #msg { color:#f88; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<video id="video" playsinline muted autoplay></video>
+<canvas id="ana"></canvas>
+
+<div id="bars"></div>
+
+<div id="ui">
+  <div class="row"><span>なめらか</span><input id="speed" type="range" min="0" max="1" step="0.001" value="0.3"><span>急激</span></div>
+  <div class="row"><span>声部の数</span><input id="voices" type="range" min="1" max="5" step="1" value="3"><span id="vnum">3音</span></div>
+  <button id="power">ON</button>
+</div>
+
+<div id="start">
+  <h1>Color Sound Scanner</h1>
+  <p>タップしてカメラと音を開始<br>（PCはスペースキーでオン／オフ）</p>
+  <p id="msg"></p>
+</div>
+
+<script>
+(() => {
+"use strict";
+const MAXV = 5;
+const BINS = 36;              // 色相ヒストグラムの分割数（10°刻み）
+const AW = 48, AH = 36;       // 解析用の縮小サイズ
+const TICK = 1000 / 15;       // 解析間隔（約15回/秒）
+
+const $ = id => document.getElementById(id);
+const view = $("view"), vctx = view.getContext("2d");
+const video = $("video");
+const ana = $("ana"); ana.width = AW; ana.height = AH;
+const actx2d = ana.getContext("2d", { willReadFrequently: true });
+const barsEl = $("bars"), powerBtn = $("power");
+const speedEl = $("speed"), voicesEl = $("voices"), vnum = $("vnum");
+
+let ac, master, gate, dryGain, wetGain, voices = [];
+let running = false, started = false;
+let voiceCount = +voicesEl.value;
+
+/* ---------- 色の変換 ---------- */
+function rgb2hsv(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+  let h = 0;
+  if (d > 0) {
+    if (mx === r) h = ((g - b) / d) % 6;
+    else if (mx === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60; if (h < 0) h += 360;
+  }
+  return [h, mx ? d / mx : 0, mx];
+}
+const wrap180 = a => ((a % 360) + 540) % 360 - 180;
+const lerp = (a, b, t) => a + (b - a) * t;
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+
+/* ---------- 色相差 → 音程（半音、連続値） ----------
+   近い色ほど協和（オクターブ・5度・4度・3度）、補色に近いほど不協和（短2度・増4度・長7度） */
+const ANCHORS = [[0,12],[25,7],[50,5],[75,4],[100,9],[125,3],[145,10],[160,11],[170,13],[180,6]];
+function hueDiffToSemis(d) {
+  d = Math.abs(d);
+  for (let i = 1; i < ANCHORS.length; i++) {
+    const [x1, y1] = ANCHORS[i], [x0, y0] = ANCHORS[i - 1];
+    if (d <= x1) return lerp(y0, y1, (d - x0) / (x1 - x0));
+  }
+  return 6;
+}
+
+/* ---------- オーディオ ---------- */
+function crushCurve(bits) {
+  const n = 4096, c = new Float32Array(n), steps = Math.pow(2, bits);
+  for (let i = 0; i < n; i++) { const x = i / (n - 1) * 2 - 1; c[i] = Math.round(x * steps) / steps; }
+  return c;
+}
+function initAudio() {
+  ac = new (window.AudioContext || window.webkitAudioContext)();
+  const comp = ac.createDynamicsCompressor();
+  comp.threshold.value = -14; comp.ratio.value = 4;
+  master = ac.createGain(); master.gain.value = 0;
+  gate = ac.createGain(); gate.gain.value = 1;
+  const bus = ac.createGain();
+  dryGain = ac.createGain(); dryGain.gain.value = 1;
+  wetGain = ac.createGain(); wetGain.gain.value = 0;
+  const crusher = ac.createWaveShaper(); crusher.curve = crushCurve(3);
+  bus.connect(dryGain).connect(gate);
+  bus.connect(crusher).connect(wetGain).connect(gate);
+  gate.connect(master).connect(comp).connect(ac.destination);
+
+  for (let i = 0; i < MAXV; i++) {
+    const a = ac.createOscillator(), b = ac.createOscillator();
+    a.type = "sine"; b.type = "sawtooth";
+    a.frequency.value = b.frequency.value = 110;
+    const ga = ac.createGain(), gb = ac.createGain();
+    ga.gain.value = 1; gb.gain.value = 0;
+    const f = ac.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = 800;
+    const g = ac.createGain(); g.gain.value = 0;
+    a.connect(ga).connect(f); b.connect(gb).connect(f); f.connect(g).connect(bus);
+    a.start(); b.start();
+    voices.push({ a, b, ga, gb, f, g, jitter: 0 });
+  }
+}
+
+function setOn(on) {
+  if (!ac) return;
+  running = on;
+  const t = ac.currentTime;
+  master.gain.cancelScheduledValues(t);
+  master.gain.setValueAtTime(master.gain.value, t);
+  master.gain.setTargetAtTime(on ? 1 : 0, t, on ? 0.05 : 0.008);  // 停止は約30msで消える
+  powerBtn.textContent = on ? "ON" : "OFF";
+  powerBtn.classList.toggle("off", !on);
+}
+
+/* ---------- 解析状態 ---------- */
+const H = new Float32Array(BINS), Ssum = new Float32Array(BINS), Vsum = new Float32Array(BINS);
+let prevLum = null;
+let rootHue = null, rootUnwrapped = 0;
+let glitch = 0, glitchVis = 0, lastGlitchAt = 0;
+let lastPeaks = [], rootIdx = 0;
+
+function analyze() {
+  if (!video.videoWidth) return;
+  actx2d.drawImage(video, 0, 0, AW, AH);
+  const px = actx2d.getImageData(0, 0, AW, AH).data;
+  const n = AW * AH;
+  const h = new Float32Array(BINS), s = new Float32Array(BINS), v = new Float32Array(BINS);
+  const lum = new Float32Array(n);
+  let diff = 0;
+  for (let i = 0, p = 0; i < n; i++, p += 4) {
+    const r = px[p], g = px[p + 1], b = px[p + 2];
+    const L = 0.299 * r + 0.587 * g + 0.114 * b;
+    lum[i] = L;
+    if (prevLum) diff += Math.abs(L - prevLum[i]);
+    const [hh, ss, vv] = rgb2hsv(r, g, b);
+    if (ss < 0.18 || vv < 0.12) continue;       // 無彩色・暗部は色として数えない
+    const k = Math.floor(hh / 360 * BINS) % BINS;
+    h[k] += 1; s[k] += ss; v[k] += vv;
+  }
+  diff = prevLum ? diff / n : 0;
+  prevLum = lum;
+
+  const abrupt = +speedEl.value;               // 0=なめらか 1=急激
+  const alpha = lerp(0.04, 0.9, abrupt);       // 面積の平滑化
+  for (let k = 0; k < BINS; k++) {
+    const frac = h[k] / n;
+    H[k] = lerp(H[k], frac, alpha);
+    Ssum[k] = lerp(Ssum[k], s[k] / n, alpha);
+    Vsum[k] = lerp(Vsum[k], v[k] / n, alpha);
+  }
+
+  /* ピーク抽出 */
+  const peaks = [];
+  for (let k = 0; k < BINS; k++) {
+    const l = (k + BINS - 1) % BINS, r = (k + 1) % BINS;
+    if (H[k] >= H[l] && H[k] > H[r] && H[k] > 0.004) {
+      const area = H[l] + H[k] + H[r];
+      let x = 0, y = 0, ss = 0, vv = 0;
+      for (const j of [l, k, r]) {
+        const ang = (j + 0.5) / BINS * Math.PI * 2;
+        x += Math.cos(ang) * H[j]; y += Math.sin(ang) * H[j];
+        ss += Ssum[j]; vv += Vsum[j];
+      }
+      let hue = Math.atan2(y, x) * 180 / Math.PI; if (hue < 0) hue += 360;
+      peaks.push({ hue, area, sat: ss / area, val: vv / area });
+    }
+  }
+  peaks.sort((a, b) => b.area - a.area);
+
+  /* 主音の決定（ヒステリシス） */
+  let root = null;
+  if (peaks.length) {
+    const margin = lerp(0.8, 0.0, abrupt);
+    let inc = null;
+    if (rootHue !== null) {
+      for (const p of peaks) if (Math.abs(wrap180(p.hue - rootHue)) < 25) { inc = p; break; }
+    }
+    const top = peaks[0];
+    if (!inc || (top !== inc && top.area > inc.area * (1 + margin))) {
+      root = top;
+      rootUnwrapped = top.hue;                  // 転調：新しい主音へ
+    } else {
+      root = inc;
+      rootUnwrapped += wrap180(inc.hue - rootHue);  // 同じ主音のまま色が流れる
+      if (rootUnwrapped < -120 || rootUnwrapped > 480) rootUnwrapped = inc.hue;
+    }
+    rootHue = root.hue;
+  }
+  const ordered = root ? [root, ...peaks.filter(p => p !== root)] : [];
+  lastPeaks = peaks; rootIdx = peaks.indexOf(root);
+
+  /* グリッチ判定 */
+  const now = performance.now();
+  const g = clamp((diff - 10) / 30, 0, 1);
+  if (g > 0.05 && running) {
+    glitch = Math.max(glitch, g);
+    glitchVis = Math.max(glitchVis, g);
+    if (now - lastGlitchAt > 220) { triggerGlitch(g); lastGlitchAt = now; }
+  }
+
+  updateAudio(ordered, abrupt);
+  drawBars();
+}
+
+function triggerGlitch(g) {
+  const t = ac.currentTime;
+  // 音の途切れ（スタッター）
+  gate.gain.cancelScheduledValues(t);
+  gate.gain.setValueAtTime(1, t);
+  let tt = t;
+  const end = t + 0.06 + g * 0.35;
+  while (tt < end) {
+    const on = 0.015 + Math.random() * 0.04, off = 0.01 + Math.random() * 0.03 * g;
+    tt += on; gate.gain.setValueAtTime(1, tt); gate.gain.linearRampToValueAtTime(0, tt + 0.003);
+    tt += off; gate.gain.setValueAtTime(0, tt); gate.gain.linearRampToValueAtTime(1, tt + 0.003);
+  }
+  // 和音のずれ（あとでゆっくり戻る）
+  for (const v of voices) v.jitter += (Math.random() * 2 - 1) * g * 180;
+}
+
+function updateAudio(ordered, abrupt) {
+  if (!ac) return;
+  const t = ac.currentTime;
+  const glide = lerp(1.6, 0.03, abrupt);
+  const dt = TICK / 1000;
+
+  // ビットクラッシュの量とその減衰
+  wetGain.gain.setTargetAtTime(glitch * 0.9, t, 0.02);
+  dryGain.gain.setTargetAtTime(1 - glitch * 0.7, t, 0.02);
+  glitch *= Math.exp(-dt / 0.25);
+
+  const f0 = 110 * Math.pow(2, rootUnwrapped / 360);
+  const root = ordered[0];
+  const norm = 1 / Math.sqrt(voiceCount);
+
+  for (let i = 0; i < MAXV; i++) {
+    const v = voices[i], p = ordered[i];
+    v.jitter *= Math.exp(-dt / 2.0);           // ゆっくり元のドローンへ
+    let target = 0;
+    if (p && i < voiceCount) {
+      const semis = i === 0 ? 0 : hueDiffToSemis(wrap180(p.hue - root.hue));
+      const freq = f0 * Math.pow(2, semis / 12);
+      const det = v.jitter;
+      v.a.frequency.setTargetAtTime(freq, t, glide);
+      v.b.frequency.setTargetAtTime(freq * 1.003, t, glide);
+      v.a.detune.setTargetAtTime(det, t, 0.03);
+      v.b.detune.setTargetAtTime(det, t, 0.03);
+      const sat = clamp(p.sat, 0, 1), val = clamp(p.val, 0, 1);
+      v.ga.gain.setTargetAtTime(1 - 0.6 * sat, t, 0.15);
+      v.gb.gain.setTargetAtTime(Math.pow(sat, 1.3) * 0.55, t, 0.15);
+      v.f.frequency.setTargetAtTime(Math.min(16000, freq * (1.5 + sat * 12)), t, 0.15);
+      v.f.Q.setTargetAtTime(0.7 + sat * 5, t, 0.15);
+      const areaW = i === 0 ? 1 : clamp(Math.sqrt(p.area / root.area), 0.25, 1);
+      target = 0.2 * (0.12 + 0.88 * Math.pow(val, 1.4)) * areaW * norm;
+    }
+    // 増える音は小音量からフェードイン、減る音だけフェードアウト
+    v.g.gain.setTargetAtTime(target, t, target > v.g.gain.value ? 0.4 : 0.3);
+  }
+
+  if (root) powerBtn.style.background = `hsl(${root.hue},${Math.round(root.sat * 80)}%,${Math.round(25 + root.val * 25)}%)`;
+}
+
+/* ---------- 表示 ---------- */
+const barEls = [];
+for (let i = 0; i < 6; i++) { const d = document.createElement("div"); d.className = "bar"; barsEl.appendChild(d); barEls.push(d); }
+function drawBars() {
+  const maxA = Math.max(0.05, ...lastPeaks.map(p => p.area));
+  const rootP = lastPeaks[rootIdx];
+  const others = lastPeaks.filter(p => p !== rootP);
+  const voiced = new Set(rootP ? [rootP, ...others.slice(0, voiceCount - 1)] : []);
+  for (let i = 0; i < barEls.length; i++) {
+    const p = lastPeaks[i], el = barEls[i];
+    if (!p) { el.style.width = "0"; el.className = "bar"; continue; }
+    el.style.width = (p.area / maxA * 100) + "%";
+    el.style.background = `hsl(${p.hue},${Math.round(40 + p.sat * 60)}%,${Math.round(35 + p.val * 30)}%)`;
+    el.className = "bar" + (p === rootP ? " root" : "") + (voiced.has(p) ? "" : " muted");
+  }
+}
+
+function resize() {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  view.width = innerWidth * dpr; view.height = innerHeight * dpr;
+}
+addEventListener("resize", resize); resize();
+
+function render() {
+  requestAnimationFrame(render);
+  const W = view.width, Hh = view.height;
+  if (!video.videoWidth) return;
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const sc = Math.max(W / vw, Hh / vh);
+  const dw = vw * sc, dh = vh * sc, dx = (W - dw) / 2, dy = (Hh - dh) / 2;
+  vctx.globalCompositeOperation = "source-over";
+  vctx.drawImage(video, dx, dy, dw, dh);
+  if (glitchVis > 0.02) {
+    const g = glitchVis;
+    // 横ずれスライス
+    const slices = 3 + Math.floor(g * 10);
+    for (let i = 0; i < slices; i++) {
+      const y = Math.random() * Hh, h = 4 + Math.random() * Hh * 0.08 * g;
+      const off = (Math.random() * 2 - 1) * W * 0.12 * g;
+      vctx.drawImage(view, 0, y, W, h, off, y, W, h);
+    }
+    // 色ずれ
+    vctx.globalCompositeOperation = "lighter";
+    vctx.globalAlpha = 0.25 * g;
+    vctx.drawImage(video, dx + 12 * g * W / 400, dy, dw, dh);
+    vctx.globalAlpha = 1;
+    vctx.globalCompositeOperation = "source-over";
+    glitchVis *= 0.88;
+  }
+}
+
+/* ---------- 操作 ---------- */
+voicesEl.addEventListener("input", () => {
+  voiceCount = +voicesEl.value;
+  vnum.textContent = voiceCount + "音";
+  drawBars();
+});
+powerBtn.addEventListener("click", () => setOn(!running));
+addEventListener("keydown", e => {
+  if (e.code === "Space" && started) { e.preventDefault(); setOn(!running); }
+});
+
+$("start").addEventListener("click", async () => {
+  if (started) return;
+  try {
+    initAudio();
+    await ac.resume();
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment", width: { ideal: 640 }, height: { ideal: 480 } }, audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+    started = true;
+    $("start").style.display = "none";
+    setOn(true);
+    setInterval(analyze, TICK);
+    render();
+  } catch (err) {
+    $("msg").textContent = "カメラを開始できませんでした：" + (err && err.message || err) +
+      "（スマホでは https で開く必要があります）";
+  }
+});
+})();
+</script>
+</body>
+</html>
