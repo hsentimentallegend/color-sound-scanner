@@ -118,7 +118,8 @@ function crushCurve(bits) {
 function initAudio() {
   ac = new (window.AudioContext || window.webkitAudioContext)();
   const comp = ac.createDynamicsCompressor();
-  comp.threshold.value = -14; comp.ratio.value = 4;
+  comp.threshold.value = -18; comp.ratio.value = 3; comp.knee.value = 12;
+  const makeup = ac.createGain(); makeup.gain.value = 1.8;   // 圧縮した分の音量を持ち上げる
   master = ac.createGain(); master.gain.value = 0;
   gate = ac.createGain(); gate.gain.value = 1;
   const bus = ac.createGain();
@@ -127,7 +128,7 @@ function initAudio() {
   const crusher = ac.createWaveShaper(); crusher.curve = crushCurve(3);
   bus.connect(dryGain).connect(gate);
   bus.connect(crusher).connect(wetGain).connect(gate);
-  gate.connect(master).connect(comp).connect(ac.destination);
+  gate.connect(master).connect(comp).connect(makeup).connect(ac.destination);
 
   for (let i = 0; i < MAXV; i++) {
     const a = ac.createOscillator(), b = ac.createOscillator();
@@ -168,18 +169,19 @@ function analyze() {
   const n = AW * AH;
   const h = new Float32Array(BINS), s = new Float32Array(BINS), v = new Float32Array(BINS);
   const lum = new Float32Array(n);
-  let diff = 0;
+  let diff = 0, changed = 0;
   for (let i = 0, p = 0; i < n; i++, p += 4) {
     const r = px[p], g = px[p + 1], b = px[p + 2];
     const L = 0.299 * r + 0.587 * g + 0.114 * b;
     lum[i] = L;
-    if (prevLum) diff += Math.abs(L - prevLum[i]);
+    if (prevLum) { const d = Math.abs(L - prevLum[i]); diff += d; if (d > 28) changed++; }
     const [hh, ss, vv] = rgb2hsv(r, g, b);
     if (ss < 0.18 || vv < 0.12) continue;       // 無彩色・暗部は色として数えない
     const k = Math.floor(hh / 360 * BINS) % BINS;
     h[k] += 1; s[k] += ss; v[k] += vv;
   }
   diff = prevLum ? diff / n : 0;
+  const changedFrac = changed / n;   // 画面のどれだけが変わったか
   prevLum = lum;
 
   const abrupt = +speedEl.value;               // 0=なめらか 1=急激
@@ -233,11 +235,14 @@ function analyze() {
 
   /* グリッチ判定 */
   const now = performance.now();
-  const g = clamp((diff - 10) / 30, 0, 1);
-  if (g > 0.05 && running) {
+  // 「何かが横切った」＝画面の一部だけが大きく変わったとき。
+  // カメラ自体を動かして画面全体が変わったとき（changedFrac が大きい）はグリッチを抑える。
+  const panSuppress = clamp((0.8 - changedFrac) / 0.35, 0, 1);
+  const g = clamp((diff - 16) / 30, 0, 1) * panSuppress;
+  if (g > 0.12 && running) {
     glitch = Math.max(glitch, g);
     glitchVis = Math.max(glitchVis, g);
-    if (now - lastGlitchAt > 220) { triggerGlitch(g); lastGlitchAt = now; }
+    if (now - lastGlitchAt > 450) { triggerGlitch(g); lastGlitchAt = now; }
   }
 
   updateAudio(ordered, abrupt);
@@ -247,14 +252,18 @@ function analyze() {
 function triggerGlitch(g) {
   const t = ac.currentTime;
   // 音の途切れ（スタッター）
-  gate.gain.cancelScheduledValues(t);
-  gate.gain.setValueAtTime(1, t);
-  let tt = t;
-  const end = t + 0.06 + g * 0.35;
+  // 今の値から始めて、急な段差（プツッ）を作らない
+  if (gate.gain.cancelAndHoldAtTime) gate.gain.cancelAndHoldAtTime(t);
+  else { gate.gain.cancelScheduledValues(t); gate.gain.setValueAtTime(gate.gain.value, t); }
+  let tt = t + 0.008;
+  gate.gain.linearRampToValueAtTime(1, tt);
+  const end = tt + 0.06 + g * 0.3;
+  const R = 0.008;   // 途切れの立ち上がり／立ち下がり
   while (tt < end) {
-    const on = 0.015 + Math.random() * 0.04, off = 0.01 + Math.random() * 0.03 * g;
-    tt += on; gate.gain.setValueAtTime(1, tt); gate.gain.linearRampToValueAtTime(0, tt + 0.003);
-    tt += off; gate.gain.setValueAtTime(0, tt); gate.gain.linearRampToValueAtTime(1, tt + 0.003);
+    const on = 0.03 + Math.random() * 0.05, off = 0.015 + Math.random() * 0.03 * g;
+    tt += on;  gate.gain.setValueAtTime(1, tt); gate.gain.linearRampToValueAtTime(0, tt + R);
+    tt += off + R; gate.gain.setValueAtTime(0, tt); gate.gain.linearRampToValueAtTime(1, tt + R);
+    tt += R;
   }
   // 和音のずれ（あとでゆっくり戻る）
   for (const v of voices) v.jitter += (Math.random() * 2 - 1) * g * 180;
@@ -271,7 +280,7 @@ function updateAudio(ordered, abrupt) {
   dryGain.gain.setTargetAtTime(1 - glitch * 0.7, t, 0.02);
   glitch *= Math.exp(-dt / 0.25);
 
-  const f0 = 110 * Math.pow(2, rootUnwrapped / 360);
+  const f0 = 220 * Math.pow(2, rootUnwrapped / 360);   // 主音域 220〜440Hz（スマホのスピーカーで聞こえやすい帯域）
   const root = ordered[0];
   const norm = 1 / Math.sqrt(voiceCount);
 
@@ -293,7 +302,7 @@ function updateAudio(ordered, abrupt) {
       v.f.frequency.setTargetAtTime(Math.min(16000, freq * (1.5 + sat * 12)), t, 0.15);
       v.f.Q.setTargetAtTime(0.7 + sat * 5, t, 0.15);
       const areaW = i === 0 ? 1 : clamp(Math.sqrt(p.area / root.area), 0.25, 1);
-      target = 0.2 * (0.12 + 0.88 * Math.pow(val, 1.4)) * areaW * norm;
+      target = 0.34 * (0.3 + 0.7 * Math.pow(val, 1.2)) * areaW * norm;
     }
     // 増える音は小音量からフェードイン、減る音だけフェードアウト
     v.g.gain.setTargetAtTime(target, t, target > v.g.gain.value ? 0.4 : 0.3);
