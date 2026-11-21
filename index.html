@@ -326,13 +326,15 @@ function analyze() {
   for (let p = 0; p < px.length; p += 4) {
     const r = px[p], g = px[p + 1], b = px[p + 2];
     const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
-    if (mx > 50 && mx < 250 && (mx - mn) / mx < 0.3) { sr += r; sg += g; sb += b; cnt++; }
+    // 本当に白に近い部分だけを使う（ベージュや肌まで含めると青へ補正しすぎる）
+    if (mx > 50 && mx < 250 && (mx - mn) / mx < 0.15) { sr += r; sg += g; sb += b; cnt++; }
   }
   if (cnt > n * 0.05 && sr && sg && sb) {   // 白っぽい部分が少なすぎるときは前の推定を使い続ける
-    const avg = (sr + sg + sb) / 3;
-    wb.r = lerp(wb.r, clamp(avg / sr, 0.6, 1.6), 0.1);
-    wb.g = lerp(wb.g, clamp(avg / sg, 0.6, 1.6), 0.1);
-    wb.b = lerp(wb.b, clamp(avg / sb, 0.6, 1.6), 0.1);
+    const avg = (sr + sg + sb) / 3, K = 0.6;   // 打ち消すのは色かぶりの6割だけ（外したときの振れを小さく）
+    const gain = s => clamp(Math.pow(avg / s, K), 0.75, 1.35);
+    wb.r = lerp(wb.r, gain(sr), 0.1);
+    wb.g = lerp(wb.g, gain(sg), 0.1);
+    wb.b = lerp(wb.b, gain(sb), 0.1);
   }
 
   let diff = 0, changed = 0, dark = 0, bright = 0, lsum = 0, lsq = 0;
@@ -364,8 +366,9 @@ function analyze() {
   for (let i = 0; i < n; i++) {
     const ss = SS[i], vv = VV[i];
     const rel = Math.min(1, ss / satRef);                 // 画面内での相対的な鮮やかさ
-    // 色らしさ w：相対的に鮮やかなほど1。ほぼ完全な無彩色（彩度0.03前後以下）と暗部は0
-    const w = smooth(0.15, 0.5, rel) * smooth(0.02, 0.06, ss) * smooth(0.05, 0.15, vv);
+    // 色らしさ w：相対的に鮮やかなほど1。白に近い色（彩度0.08前後以下）と暗部は0。
+    // 補正の残りで生まれるオレンジ／青のわずかな色づきを、色として数えないための幅
+    const w = smooth(0.15, 0.5, rel) * smooth(0.06, 0.13, ss) * smooth(0.05, 0.15, vv);
     grayAcc += 1 - w;
     if (w > 0) {
       const k = Math.floor(HH[i] / 360 * BINS) % BINS;
