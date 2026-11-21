@@ -306,6 +306,7 @@ const H = new Float32Array(BINS), Ssum = new Float32Array(BINS), Vsum = new Floa
 const scene = { dark: 0, bright: 0, gray: 0, mean: 0.5, contrast: 0 };
 let satRef = 0.3;   // この画面で「鮮やか」とみなす彩度（画面ごとに自動で決まる）
 let prevLum = null;
+const wb = { r: 1, g: 1, b: 1 };   // 照明の色かぶりを打ち消す倍率（ゆっくり追従）
 let rootHue = null, rootSwitched = false;
 let key = null, keyCand = null, keyCandSince = 0;   // 今の調と、切り替え候補の調
 let glitch = 0, glitchVis = 0, lastGlitchAt = 0;
@@ -319,10 +320,26 @@ function analyze() {
   const h = new Float32Array(BINS), s = new Float32Array(BINS), v = new Float32Array(BINS);
   const lum = new Float32Array(n);
   const HH = new Float32Array(n), SS = new Float32Array(n), VV = new Float32Array(n);
+  // ホワイトバランス補正：白っぽい（彩度の低い）部分の平均の色かぶりを「照明の色」とみなし、
+  // 各色の強さを打ち消す。電球色の下の白い壁がオレンジとして数えられないようにする
+  let sr = 0, sg = 0, sb = 0, cnt = 0;
+  for (let p = 0; p < px.length; p += 4) {
+    const r = px[p], g = px[p + 1], b = px[p + 2];
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    if (mx > 50 && mx < 250 && (mx - mn) / mx < 0.3) { sr += r; sg += g; sb += b; cnt++; }
+  }
+  if (cnt > n * 0.05 && sr && sg && sb) {   // 白っぽい部分が少なすぎるときは前の推定を使い続ける
+    const avg = (sr + sg + sb) / 3;
+    wb.r = lerp(wb.r, clamp(avg / sr, 0.6, 1.6), 0.1);
+    wb.g = lerp(wb.g, clamp(avg / sg, 0.6, 1.6), 0.1);
+    wb.b = lerp(wb.b, clamp(avg / sb, 0.6, 1.6), 0.1);
+  }
+
   let diff = 0, changed = 0, dark = 0, bright = 0, lsum = 0, lsq = 0;
   for (let i = 0, p = 0; i < n; i++, p += 4) {
-    const r = px[p], g = px[p + 1], b = px[p + 2];
-    const L = 0.299 * r + 0.587 * g + 0.114 * b;
+    const r0 = px[p], g0 = px[p + 1], b0 = px[p + 2];
+    const L = 0.299 * r0 + 0.587 * g0 + 0.114 * b0;
+    const r = Math.min(255, r0 * wb.r), g = Math.min(255, g0 * wb.g), b = Math.min(255, b0 * wb.b);
     lum[i] = L;
     if (prevLum) { const d = Math.abs(L - prevLum[i]); diff += d; if (d > 28) changed++; }
     const [hh, ss, vv] = rgb2hsv(r, g, b);
