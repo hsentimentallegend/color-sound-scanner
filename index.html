@@ -21,6 +21,11 @@
   .bar.muted { opacity:.3; }
   #key { position:fixed; right:12px; top:calc(env(safe-area-inset-top) + 8px); font-size:13px;
     text-shadow:0 1px 3px #000; pointer-events:none; opacity:.9; }
+  #key[data-note]::after { content:attr(data-note); display:block; font-size:11px; opacity:.8; margin-top:2px; text-align:right; }
+  #focusRing { position:fixed; width:72px; height:72px; margin:-36px 0 0 -36px; border:2px solid #ffd54a; border-radius:8px;
+    pointer-events:none; opacity:0; transform:scale(1.4); transition:opacity .2s, transform .25s; }
+  #focusRing.show { opacity:1; transform:scale(1); }
+  #focusRing.fail { border-color:rgba(255,255,255,.5); }
   .bar.achro { margin-top:4px; outline:1px solid rgba(255,255,255,.35); }
 
   /* 操作パネル */
@@ -55,6 +60,7 @@
 
 <div id="bars"></div>
 <div id="key"></div>
+<div id="focusRing"></div>
 
 <div id="ui">
   <div class="row"><span>なめらか</span><input id="speed" type="range" min="0" max="1" step="0.001" value="0.3"><span>急激</span></div>
@@ -665,6 +671,37 @@ function render() {
   }
 }
 
+/* ---------- タップで焦点 ---------- */
+let camTrack = null, focusTimer = 0, focusNoticeShown = false;
+const ring = $("focusRing");
+view.addEventListener("click", async e => {
+  if (!camTrack || !video.videoWidth) return;
+  // 画面上の位置 → 映像上の位置（0〜1）。表示は中央合わせの切り抜きなのでその分を戻す
+  const W = innerWidth, Hh = innerHeight, vw = video.videoWidth, vh = video.videoHeight;
+  const sc = Math.max(W / vw, Hh / vh), dx = (W - vw * sc) / 2, dy = (Hh - vh * sc) / 2;
+  const x = clamp((e.clientX - dx) / (vw * sc), 0, 1), y = clamp((e.clientY - dy) / (vh * sc), 0, 1);
+  ring.style.left = e.clientX + "px"; ring.style.top = e.clientY + "px";
+  ring.className = "show";
+  clearTimeout(focusTimer);
+  const caps = camTrack.getCapabilities ? camTrack.getCapabilities() : {};
+  const c = {};
+  if (caps.focusMode) {
+    if (caps.focusMode.includes("single-shot")) c.focusMode = "single-shot";
+    else if (caps.focusMode.includes("continuous")) c.focusMode = "continuous";
+  }
+  if (caps.exposureMode && caps.exposureMode.includes("continuous")) c.exposureMode = "continuous";
+  if ("pointsOfInterest" in caps || caps.focusMode) c.pointsOfInterest = [{ x, y }];
+  let ok = false;
+  if (Object.keys(c).length) {
+    try { await camTrack.applyConstraints({ advanced: [c] }); ok = true; } catch (_) {}
+  }
+  if (!ok) {
+    ring.className = "show fail";
+    if (!focusNoticeShown) { focusNoticeShown = true; keyEl.dataset.note = "この端末のブラウザは焦点の指定に対応していません"; }
+  }
+  focusTimer = setTimeout(() => { ring.className = ""; delete keyEl.dataset.note; }, 900);
+});
+
 /* ---------- 操作 ---------- */
 crushEl.addEventListener("input", () => { cnum.textContent = Math.round(crushEl.value * 100) + "%"; });
 function setMode(chord) {
@@ -690,9 +727,16 @@ $("start").addEventListener("click", async () => {
     initAudio();
     await ac.resume();
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "environment", width: { ideal: 640 }, height: { ideal: 480 } }, audio: false
+      // 表示用に高めの解像度で受け取る（解析は縮小して行うので負荷はほぼ変わらない）
+      video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false
     });
     video.srcObject = stream;
+    camTrack = stream.getVideoTracks()[0];
+    // 対応端末では常時オートフォーカスにしておく
+    const caps = camTrack.getCapabilities ? camTrack.getCapabilities() : {};
+    if (caps.focusMode && caps.focusMode.includes("continuous")) {
+      camTrack.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => {});
+    }
     await video.play();
     started = true;
     $("start").style.display = "none";
