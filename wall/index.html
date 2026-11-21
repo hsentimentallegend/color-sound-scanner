@@ -340,7 +340,7 @@ function tick() {
     wb.r = lerp(wb.r, gain(wr), 0.1); wb.g = lerp(wb.g, gain(wg), 0.1); wb.b = lerp(wb.b, gain(wbb), 0.1);
   }
   const px2 = CELL_PX * CELL_PX;
-  const hist = new Float32Array(12), histV = new Float32Array(12), histX = new Float32Array(12), histY = new Float32Array(12);
+  const hist = new Float32Array(12), histV = new Float32Array(12), histX = new Float32Array(12), histY = new Float32Array(12), histN = new Float32Array(12);
   let vsum = 0, dark = 0, gray = 0;
   for (let i = 0; i < n; i++) {
     const [h, s0, v] = rgb2hsv(Math.min(255, R[i] / px2 * wb.r), Math.min(255, Gc[i] / px2 * wb.g), Math.min(255, B[i] / px2 * wb.b));
@@ -349,7 +349,7 @@ function tick() {
     vsum += v; if (v < 0.2) dark++; if (s < 0.15) gray++;
     if (s > 0.15 && v > 0.15) {
       const k = Math.floor(h / 30) % 12, w = s * s, a = h * Math.PI / 180;
-      hist[k] += w; histV[k] += v * w; histX[k] += Math.cos(a) * w; histY[k] += Math.sin(a) * w;
+      hist[k] += w; histN[k]++; histV[k] += v * w; histX[k] += Math.cos(a) * w; histY[k] += Math.sin(a) * w;
     }
   }
   scene.mean = lerp(scene.mean, vsum / n, 0.2);
@@ -359,10 +359,13 @@ function tick() {
   /* 調：いちばん多い色（彩度で重み付け）の感情から。ちらつかないよう0.7秒続いたら転調 */
   let best = 0, total = 0;
   for (let k = 0; k < 12; k++) { total += hist[k]; if (hist[k] > hist[best]) best = k; }
-  let dom;
-  if (total > n * 0.03) {
-    let hue = Math.atan2(histY[best], histX[best]) * 180 / Math.PI; if (hue < 0) hue += 360;
-    dom = classify(hue / 360, true, histV[best] / hist[best]);
+  // 色のあるマスがほとんどない、または画面の大半が白・黒・グレーなら「無彩色」として扱う
+  // （照明でうっすらオレンジがかった白い壁を、オレンジと数えないため）
+  const chroma = total > n * 0.03 && scene.gray < 0.8;
+  let dom, domHue = 0;
+  if (chroma) {
+    domHue = Math.atan2(histY[best], histX[best]) * 180 / Math.PI; if (domHue < 0) domHue += 360;
+    dom = classify(domHue / 360, true, histV[best] / hist[best]);
   } else dom = classify(0, false, scene.mean);
   const rootPc = ((freqToMidi(dom.baseFreq) % 12) + 12) % 12;
   const sig = dom.emotion + "/" + dom.scale + "/" + rootPc, now = performance.now();
@@ -437,10 +440,16 @@ function tick() {
   sub.g.gain.setTargetAtTime(0.35 * smooth(0.1, 0.6, scene.dark) * (0.4 + 0.6 * coh), t, 0.3);
 
   keyEl.textContent = `${key.emotion} · ${NOTE_NAMES[key.rootPc]} ${SCALES[key.scale].ja}` + (coh > 0.5 ? ` ｜ ${chordLabel}` : '');
-  // 電源ボタンをいちばん多い色に
-  if (total > n * 0.03) {
-    let hue = Math.atan2(histY[best], histX[best]) * 180 / Math.PI;
-    powerBtn.style.background = `hsl(${hue},70%,35%)`;
+  // 電源ボタンを、調を決めた色に（無彩色なら画面の明るさに合わせた白〜グレー〜黒）
+  if (chroma) {
+    const sat = Math.round(clamp(Math.sqrt(hist[best] / histN[best]), 0, 1) * 85);   // うすい色はうすく
+    const lit = Math.round(25 + 25 * histV[best] / hist[best]);
+    powerBtn.style.background = `hsl(${domHue},${sat}%,${lit}%)`;
+    powerBtn.style.color = "#fff";
+  } else {
+    const lit = Math.round(clamp(scene.mean, 0, 1) * 92 + 4);
+    powerBtn.style.background = `hsl(0,0%,${lit}%)`;
+    powerBtn.style.color = lit > 60 ? "#000" : "#fff";
   }
 }
 function nearestTone(m, rootPc, pcs) {
