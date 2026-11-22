@@ -264,6 +264,8 @@ function initAudio() {
   d1.connect(dG); d2.connect(d2G).connect(dG); dG.connect(bus);
   linkPitch(d1); linkPitch(d2); d1.start(); d2.start();
   drone = { d1, d2, g: dG };
+  initNotePool();
+  initGrainPool();
 }
 // 音程の沈み／浮き（上下ドラッグ）の対象として登録／解除する。
 // 音程は指が動いたときだけ、まとめて書き換える（常時つないでおく方式より軽い）
@@ -329,7 +331,6 @@ let key = null, keyCand = null, keyCandSince = 0, susOn = false;
 let locked = null, lastT = null, lastGrainAt = 0;
 const scene = { mean: 0.5, dark: 0, gray: 0 };
 const slots = LOOP_RATIOS.map(() => ({ next: 0 }));
-const sounding = new Set();   // 今鳴っている呼吸の音（同じ高さが重ならないように）
 
 function tick() {
   if (!video.videoWidth || !ac) return;
@@ -491,95 +492,112 @@ function pickCell() {
   for (let i = 0; i < w.length; i++) { r -= w[i]; if (r <= 0) return i; }
   return w.length - 1;
 }
+/* ---------- 呼吸する音：最初に8声を作っておき、使い回す ----------
+   鳴らすたびに部品を作って捨てると、その瞬間に負荷の山ができて音が途切れる。
+   Gaze と同じく部品は鳴らしっぱなしにして、音程・音色・満ち引きの予定だけを書き換える */
+const MAX_NOTES = 8;
+const notePool = [];
+function initNotePool() {
+  for (let i = 0; i < MAX_NOTES; i++) {
+    const o = ac.createOscillator(); o.type = "sine";
+    const saw = ac.createOscillator(); saw.type = "sawtooth";
+    const sh = ac.createOscillator(); sh.type = "sine";
+    o.frequency.value = saw.frequency.value = 220; sh.frequency.value = 440;
+    const oG = ac.createGain(), sawG = ac.createGain(), shG = ac.createGain();
+    oG.gain.value = 1; sawG.gain.value = 0; shG.gain.value = 0;
+    const lp = ac.createBiquadFilter(); lp.type = "lowpass"; lp.Q.value = 0.4; lp.frequency.value = 400;
+    const env = ac.createGain(); env.gain.value = 0;
+    o.connect(oG).connect(lp); saw.connect(sawG).connect(lp);
+    lp.connect(env);
+    let pan = null;
+    if (ac.createStereoPanner) { pan = ac.createStereoPanner(); env.connect(pan).connect(bus); } else env.connect(bus);
+    sh.connect(shG).connect(shimmer);   // 1オクターブ上のきらめきは残響の中だけで鳴る
+    linkPitch(o, 0); linkPitch(saw, 7); linkPitch(sh, 0);
+    o.start(); saw.start(); sh.start();
+    notePool.push({ o, saw, sh, oG, sawG, shG, lp, env, pan, startAt: -1, busyUntil: 0, m: -1 });
+  }
+}
+// その時刻から先の予定を消し、今の値から続ける（値が飛ばないのでプツッとしない）
+function holdParam(p, t) {
+  if (p.cancelAndHoldAtTime) p.cancelAndHoldAtTime(t);
+  else { p.cancelScheduledValues(t); p.setValueAtTime(p.value, t); }
+}
+const isSounding = (m, now) => notePool.some(v => now < v.busyUntil && v.m === m);
+
 // 呼吸する音：数秒かけて満ちて引く。サイン波が中心、鮮やかなマスほどやわらかいノコギリ波が混ざる
 function breathNote(ci, dur, T, K, pcsFor, coh, breath) {
   const c = cells[ci];
-  if (!c) return;
-  const t = ac.currentTime + 0.03;
+  if (!c || !notePool.length) return;
+  const now = ac.currentTime;
   const free = 50 + Math.pow(c.v, 0.9) * 26 + (c.h / 360) * 12 * smooth(0.05, 0.2, c.s);
   let m = nearestTone(free, K.rootPc, pcsFor(free, c.s));
-  while (sounding.has(m) && m < 90) m += 12;
-  sounding.add(m);
+  while (isSounding(m, now) && m < 90) m += 12;
   const midi = lerp(free, m, coh);   // まとまりが低いほど、構成音から滲んだ高さで鳴る
   const f = midiToFreq(midi), s = c.s, v = c.v;
   const atk = lerp(3.5, 0.8, breath), rel = lerp(6, 2.5, breath), hold = Math.max(0.4, dur - atk);
-  const tRel = t + atk + hold, tEnd = tRel + rel * 1.6;
+
+  // 空いている声を使う。全部ふさがっていたら、いちばん古い声を0.3秒ほどでそっと消してから使う
+  let vo = notePool.find(x => now >= x.busyUntil), t;
+  if (vo) t = now + 0.03;
+  else {
+    vo = notePool.reduce((a, b) => (a.startAt <= b.startAt ? a : b));
+    for (const p of [vo.env.gain, vo.shG.gain, vo.lp.frequency]) holdParam(p, now);
+    vo.env.gain.setTargetAtTime(0, now, 0.06);
+    vo.shG.gain.setTargetAtTime(0, now, 0.06);
+    t = now + 0.3;
+  }
+  const tRel = t + atk + hold;
+  vo.m = m; vo.startAt = t; vo.busyUntil = tRel + rel * 1.6;
   glow[ci] = 1; glowNote[ci] = NOTE_NAMES[((Math.round(midi) % 12) + 12) % 12] + (Math.floor(Math.round(midi) / 12) - 1);
 
-  // 同時に鳴る音の数に上限を設ける（重なりすぎると端末の処理が追いつかず、音がブツブツ途切れる）。
-  // 上限に達したら、いちばん古い音を0.3秒ほどでそっと消してから入れ替える
-  while (notes.length >= MAX_NOTES) retire(notes.shift());
-
-  const env = ac.createGain(); env.gain.value = 0;
-  const kill = ac.createGain(); kill.gain.value = 1;   // 入れ替えで消すとき専用（env の予定とぶつからない）
-  const lp = ac.createBiquadFilter(); lp.type = "lowpass"; lp.Q.value = 0.4;
-  let out = kill;
-  if (ac.createStereoPanner) { out = ac.createStereoPanner(); out.pan.value = ((ci % GX) / Math.max(1, GX - 1) * 2 - 1) * 0.7; kill.connect(out); }
-  lp.connect(env).connect(kill); out.connect(bus);
-  const oscs = [];
-  const add = (type, mult, level, det, dest) => {
-    const o = ac.createOscillator(); o.type = type; o.frequency.value = f * mult;
-    const g = ac.createGain(); g.gain.value = level; o.connect(g).connect(dest);
-    linkPitch(o, det); o.start(t); o.stop(tEnd); oscs.push(o);
-  };
-  // 部品は必要なものだけ：サイン波1本＋（鮮やかなマスだけ）ノコギリ波2本＋（明るいマスだけ）きらめき
-  add("sine", 1, 1.1 - 0.55 * s, 0, lp);
-  const sawL = Math.pow(s, 1.2) * 0.4;
-  if (sawL > 0.06) { add("sawtooth", 1, sawL, -8, lp); add("sawtooth", 1, sawL, 8, lp); }
-  // 1オクターブ上のきらめき（明るいマスほど）。残響の中だけで鳴る
-  const shG = ac.createGain(); shG.gain.value = 0;
-  const shKill = ac.createGain(); shKill.gain.value = 1;
-  shG.connect(shKill).connect(shimmer);
-  if (v > 0.45) {
-    add("sine", 2, 1, 0, shG);
-    shG.gain.setValueAtTime(0, t);
-    shG.gain.setTargetAtTime(0.05 * smooth(0.4, 0.9, v), t + atk * 0.5, atk / 2);
-    shG.gain.setTargetAtTime(0, tRel, rel / 4);
-  }
+  // 音が消えている瞬間に、音程・音色・左右の位置を切り替える
+  vo.o.frequency.setValueAtTime(f, t);
+  vo.saw.frequency.setValueAtTime(f, t);
+  vo.sh.frequency.setValueAtTime(f * 2, t);
+  vo.oG.gain.setValueAtTime(1.1 - 0.55 * s, t);
+  const sawL = Math.pow(s, 1.2) * 0.5;
+  vo.sawG.gain.setValueAtTime(sawL > 0.06 ? sawL : 0, t);
+  if (vo.pan) vo.pan.pan.setValueAtTime(((ci % GX) / Math.max(1, GX - 1) * 2 - 1) * 0.7, t);
+  // きらめき（明るいマスほど）
+  vo.shG.gain.setTargetAtTime(v > 0.45 ? 0.05 * smooth(0.4, 0.9, v) : 0, t + atk * 0.5, atk / 2);
+  vo.shG.gain.setTargetAtTime(0, tRel, rel / 4);
   // フィルターが息をするように開いて閉じる
-  lp.frequency.setValueAtTime(f * 1.2, t);
-  lp.frequency.setTargetAtTime(Math.min(12000, f * (2 + 6 * s) * (0.6 + 0.6 * v)), t, atk / 2);
-  lp.frequency.setTargetAtTime(f * 1.1, tRel, rel / 3);
+  vo.lp.frequency.setValueAtTime(f * 1.2, t);
+  vo.lp.frequency.setTargetAtTime(Math.min(12000, f * (2 + 6 * s) * (0.6 + 0.6 * v)), t, atk / 2);
+  vo.lp.frequency.setTargetAtTime(f * 1.1, tRel, rel / 3);
+  // 満ちて引く
   const peak = 0.13 * (0.55 + 0.45 * v);
-  env.gain.setValueAtTime(0, t);
-  env.gain.setTargetAtTime(peak, t, atk / 3);
-  env.gain.setTargetAtTime(0, tRel, rel / 4);
-  const note = { oscs, kill, shKill, m, done: false };
-  notes.push(note);
-  oscs[0].onended = () => {
-    note.done = true;
-    const k = notes.indexOf(note); if (k >= 0) notes.splice(k, 1);
-    sounding.delete(m);
-    for (const o of oscs) unlinkPitch(o);
-    try { out.disconnect(); shKill.disconnect(); } catch (_) {}
-  };
+  vo.env.gain.setTargetAtTime(peak, t, atk / 3);
+  vo.env.gain.setTargetAtTime(0, tRel, rel / 4);
 }
-const MAX_NOTES = 8;
-const notes = [];   // 鳴っている呼吸の音（古い順）
-function retire(note) {
-  if (!note || note.done) return;
-  const t = ac.currentTime;
-  note.kill.gain.setTargetAtTime(0, t, 0.08);
-  note.shKill.gain.setTargetAtTime(0, t, 0.08);
-  for (const o of note.oscs) { try { o.stop(t + 0.5); } catch (_) {} }
-  sounding.delete(note.m);
+
+/* ---------- デジタルの粒：これも4つを作っておき、順番に使い回す ---------- */
+const grainPool = [];
+let grainIdx = 0;
+function initGrainPool() {
+  const src = ac.createBufferSource(); src.buffer = noiseBuf; src.loop = true; src.start();
+  for (let i = 0; i < 4; i++) {
+    const bp = ac.createBiquadFilter(); bp.type = "bandpass"; bp.Q.value = 12; bp.frequency.value = 2000;
+    const g = ac.createGain(); g.gain.value = 0;
+    src.connect(bp).connect(g);
+    let o = g, pan = null;
+    if (ac.createStereoPanner) { pan = ac.createStereoPanner(); g.connect(pan); o = pan; }
+    o.connect(conv); o.connect(bus);
+    grainPool.push({ bp, g, pan });
+  }
 }
-// デジタルの粒：ノイズを構成音の高さで細く切り出した、短いきらめき
+// ノイズを構成音の高さで細く切り出した、短いきらめき
 function grain(T, K) {
+  const gr = grainPool[grainIdx++ % grainPool.length];
+  if (!gr) return;
   const t = ac.currentTime + 0.01, d = 0.02 + Math.random() * 0.07;
   const tones = [0, T['3'], T['5'], T['7'], T['9']];
   const f = midiToFreq(60 + K.rootPc + tones[(Math.random() * 5) | 0] + (Math.random() < 0.5 ? 12 : 24));
-  const src = ac.createBufferSource(); src.buffer = noiseBuf;
-  const bp = ac.createBiquadFilter(); bp.type = "bandpass"; bp.frequency.value = f; bp.Q.value = 12;
-  const g = ac.createGain(); g.gain.value = 0;
-  src.connect(bp).connect(g);
-  let o = g;
-  if (ac.createStereoPanner) { o = ac.createStereoPanner(); o.pan.value = Math.random() * 1.6 - 0.8; g.connect(o); }
-  o.connect(conv); o.connect(bus);
-  g.gain.setValueAtTime(0, t);
-  g.gain.linearRampToValueAtTime(0.9, t + 0.006);
-  g.gain.setTargetAtTime(0, t + 0.012, d / 3);
-  src.start(t, Math.random() * 2.5); src.stop(t + d + 0.4);
+  holdParam(gr.g.gain, t);
+  gr.bp.frequency.setValueAtTime(f, t);
+  if (gr.pan) gr.pan.pan.setValueAtTime(Math.random() * 1.6 - 0.8, t);
+  gr.g.gain.linearRampToValueAtTime(0.9, t + 0.006);
+  gr.g.gain.setTargetAtTime(0, t + 0.012, d / 3);
 }
 
 /* ---------- 主音ロック ---------- */
