@@ -41,6 +41,14 @@
     box-shadow:0 4px 18px rgba(0,0,0,.6); transition:background .2s, transform .08s; touch-action:manipulation; }
   #power:active { transform:scale(.95); }
   #power.off { background:#222 !important; opacity:.75; }
+  .btns { display:flex; align-items:center; justify-content:center; gap:22px; }
+  .btns .pad { width:60px; }
+  #lock { width:60px; height:60px; border-radius:50%; border:2px solid rgba(255,255,255,.75); background:rgba(0,0,0,.4);
+    color:#fff; font-size:13px; font-weight:600; line-height:1.15; cursor:pointer; touch-action:manipulation;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; transition:transform .08s; }
+  #lock small { font-size:10px; font-weight:400; opacity:.85; }
+  #lock:active { transform:scale(.94); }
+  #lock.on { border:3px solid #fff; box-shadow:0 0 14px rgba(255,255,255,.7); font-size:18px; }
 
   #start { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
     gap:14px; background:#000; z-index:10; text-align:center; padding:24px; cursor:pointer; }
@@ -65,7 +73,7 @@
   <div class="row"><span>マス目</span><div class="seg" id="gridSeg">
     <button data-g="3x2">6</button><button data-g="6x4" class="on">24</button><button data-g="8x6">48</button>
   </div><span id="gridL">24声</span></div>
-  <button id="power">ON</button>
+  <div class="btns"><button id="lock">主音<small>ロック</small></button><button id="power">ON</button><span class="pad"></span></div>
 </div>
 
 <div id="start">
@@ -87,7 +95,7 @@ const $ = id => document.getElementById(id);
 const view = $("view"), vctx = view.getContext("2d");
 const video = $("video");
 const ana = $("ana"), actx2d = ana.getContext("2d", { willReadFrequently: true });
-const keyEl = $("key"), powerBtn = $("power");
+const keyEl = $("key"), powerBtn = $("power"), lockBtn = $("lock");
 const cohEl = $("coh"), fuzzEl = $("fuzz"), revEl = $("rev");
 
 /* ---------- 便利関数 ---------- */
@@ -160,7 +168,7 @@ function chordName(rootMidi, T) {
 }
 
 /* ---------- オーディオ ---------- */
-let ac, master, busClean, busGrit, preA, preB, revGain, toneLP, noiseG, noiseBP, sub, bend;
+let ac, master, busClean, busGrit, preA, preB, revGain, toneLP, noiseG, noiseBP, sub, pedal, bend;
 let voices = [], running = false, started = false;
 
 function tanhCurve(k) {
@@ -248,6 +256,17 @@ function initAudio() {
   const sg = G(0); so.connect(sg).connect(hp); so.start();
   if (bend) bend.connect(so.detune);
   sub = { o: so, g: sg };
+
+  // 主音ロックの持続音（ペダル）：他の声と同じくファズ→コーラス→残響を通して壁に溶かす
+  const pg = G(0), pa = ac.createOscillator(), pb = ac.createOscillator(), pc = ac.createOscillator(), pcg = G(0.35);
+  pa.type = pb.type = pc.type = "sawtooth";
+  pa.frequency.value = pb.frequency.value = 65; pc.frequency.value = 130;
+  pa.detune.value = -7; pb.detune.value = 7;
+  pa.connect(pg); pb.connect(pg); pc.connect(pcg).connect(pg);
+  pg.connect(busClean);
+  if (bend) { bend.connect(pa.detune); bend.connect(pb.detune); bend.connect(pc.detune); }
+  pa.start(); pb.start(); pc.start();
+  pedal = { a: pa, b: pb, c: pc, g: pg };
 }
 
 /* ---------- 声部（マス目1つ＝1声） ---------- */
@@ -379,8 +398,13 @@ function tick() {
 
   // くすんだ画面では3度を抜く（境目でちらつかないようヒステリシス）
   if (susOn ? scene.gray < 0.55 : scene.gray > 0.75) susOn = !susOn;
-  const T = chordTones(SCALES[key.scale].steps, susOn, scene.mean > 0.5);
-  chordLabel = chordName(60 + key.rootPc, T);
+  // 主音ロック中は、押した瞬間の調とコードをそのまま使う（裏では今の画面の調も追い続ける）
+  let T;
+  if (locked) { T = locked.T; chordLabel = locked.label; }
+  else { T = chordTones(SCALES[key.scale].steps, susOn, scene.mean > 0.5); chordLabel = chordName(60 + key.rootPc, T); lastT = T; }
+  const K = locked ? locked.key : key;
+  // ロック解除の直後だけ、音の高さをゆっくり今の調へ移す
+  const glide = performance.now() < glideSlowUntil ? 0.35 : GLIDE;
   // 音域ごとに使う構成音：低音は1・5だけ（濁らせない）、中音は1・3・5、高音は7・9も
   const pcsLow = [0, T['5']], pcsMid = [0, T['3'], T['5']], pcsHigh = [0, T['3'], T['5'], T['7'], T['9']];
 
@@ -398,17 +422,17 @@ function tick() {
     const free = 31 + Math.pow(c.v, 0.85) * 46 + hueOff;
     /* コードの音：自由な音程にいちばん近い構成音（くすんだマスは1・5の安定した音へ） */
     const pcs = c.s < 0.12 ? pcsLow : free < 48 ? pcsLow : free < 62 ? pcsMid : pcsHigh;
-    let snap = nearestTone(free, key.rootPc, pcs);
+    let snap = nearestTone(free, K.rootPc, pcs);
     // 境目で行ったり来たりしないよう、今の音より半音以上近いときだけ移る
-    if (v.snap !== null && pcs.includes((((v.snap - key.rootPc) % 12) + 12) % 12) &&
+    if (v.snap !== null && pcs.includes((((v.snap - K.rootPc) % 12) + 12) % 12) &&
         Math.abs(free - snap) > Math.abs(free - v.snap) - 0.6) snap = v.snap;
     v.snap = snap;
     const midi = lerp(free, snap, coh);
     v.midi = midi;
     const freq = midiToFreq(midi);
     if (Math.abs(freq / v.freq - 1) > 0.0008) {
-      v.a.frequency.setTargetAtTime(freq, t, GLIDE);
-      v.b.frequency.setTargetAtTime(freq, t, GLIDE);
+      v.a.frequency.setTargetAtTime(freq, t, glide);
+      v.b.frequency.setTargetAtTime(freq, t, glide);
       v.freq = freq;
     }
     // ノイズ寄りほど2本のノコギリ波を大きくずらす（うなりが濁る）
@@ -436,10 +460,18 @@ function tick() {
   toneLP.frequency.setTargetAtTime(2200 * Math.pow(5, clamp(scene.mean * 1.3, 0, 1)), t, 0.15);
   noiseBP.frequency.setTargetAtTime(300 + scene.mean * 3500, t, 0.1);
   noiseG.gain.setTargetAtTime((1 - coh) * (1 - coh) * (0.05 + 0.25 * meanSat), t, 0.08);
-  sub.o.frequency.setTargetAtTime(midiToFreq(36 + key.rootPc), t, 0.08);
+  sub.o.frequency.setTargetAtTime(midiToFreq(36 + K.rootPc), t, 0.08);
   sub.g.gain.setTargetAtTime(0.35 * smooth(0.1, 0.6, scene.dark) * (0.4 + 0.6 * coh), t, 0.3);
 
-  keyEl.textContent = `${key.emotion} · ${NOTE_NAMES[key.rootPc]} ${SCALES[key.scale].ja}` + (coh > 0.5 ? ` ｜ ${chordLabel}` : '');
+  // 主音の持続音（ペダル）：ロック中だけ鳴る。2本ずらしたノコギリ波＋1オクターブ上を少し
+  const pf = midiToFreq(36 + K.rootPc);
+  pedal.a.frequency.setTargetAtTime(pf, t, 0.05);
+  pedal.b.frequency.setTargetAtTime(pf, t, 0.05);
+  pedal.c.frequency.setTargetAtTime(pf * 2, t, 0.05);
+  pedal.g.gain.setTargetAtTime(locked ? PEDAL_LEVEL : 0, t, locked ? 0.25 : 0.4);
+
+  keyEl.textContent = (locked ? '［固定］' : '') + `${K.emotion} · ${NOTE_NAMES[K.rootPc]} ${SCALES[K.scale].ja}` +
+    (coh > 0.5 ? ` ｜ ${chordLabel}` : '');
   // 電源ボタンを、調を決めた色に（無彩色なら画面の明るさに合わせた白〜グレー〜黒）
   if (chroma) {
     const sat = Math.round(clamp(Math.sqrt(hist[best] / histN[best]), 0, 1) * 85);   // うすい色はうすく
@@ -450,6 +482,28 @@ function tick() {
     const lit = Math.round(clamp(scene.mean, 0, 1) * 92 + 4);
     powerBtn.style.background = `hsl(0,0%,${lit}%)`;
     powerBtn.style.color = lit > 60 ? "#000" : "#fff";
+  }
+}
+
+/* ---------- 主音ロック ---------- */
+let locked = null, lastT = null, glideSlowUntil = 0;
+const PEDAL_LEVEL = 0.32;   // 持続音の大きさ（大きすぎると壁を塗りつぶすので控えめ）
+function toggleLock() {
+  if (!started || !key) return;
+  if (!locked) {
+    // 押した瞬間の調・コード・色を覚える
+    const T = lastT || chordTones(SCALES[key.scale].steps, susOn, scene.mean > 0.5);
+    locked = { key: { ...key }, T, label: chordName(60 + key.rootPc, T),
+               bg: powerBtn.style.background, fg: powerBtn.style.color };
+    lockBtn.classList.add("on");
+    lockBtn.style.background = locked.bg; lockBtn.style.color = locked.fg || "#fff";
+    lockBtn.innerHTML = `${NOTE_NAMES[key.rootPc]}<small>固定中</small>`;
+  } else {
+    locked = null;
+    glideSlowUntil = performance.now() + 1200;
+    lockBtn.classList.remove("on");
+    lockBtn.style.background = ""; lockBtn.style.color = "";
+    lockBtn.innerHTML = "主音<small>ロック</small>";
   }
 }
 function nearestTone(m, rootPc, pcs) {
@@ -594,8 +648,10 @@ $("gridSeg").addEventListener("click", e => {
   buildGrid(b.dataset.g);
 });
 powerBtn.addEventListener("click", () => setOn(!running));
+lockBtn.addEventListener("click", toggleLock);
 addEventListener("keydown", e => {
   if (e.code === "Space" && started) { e.preventDefault(); setOn(!running); }
+  if (e.code === "KeyL" && started) toggleLock();
 });
 buildGrid(gridSpec);
 resize();
