@@ -230,12 +230,12 @@ function initAudio() {
   flut.connect(G(0.00006)).connect(wob.delayTime);   // 細かい震え（±4セントほど）
   bus.connect(wob).connect(G(0.9)).connect(sat).connect(warm).connect(hp);
   hp.connect(G(0.5)).connect(comp);
-  // 残響：長さを8秒→5秒にして軽く（余韻の長さはテープエコーの繰り返しでも補う）
+  // 残響：長さを8秒→4秒にして軽く（余韻の長さはテープエコーの繰り返しでも補う）
   // 残響に入る音は、先に高域を丸めておく（高い音が残響で重なっても耳に痛くならないように）。
   // conv はこの「残響の入口」で、エコー・きらめき・粒もここを通って残響へ入る
   conv = BQ("lowpass", 2600, 0.5);
   const revShelf = BQ("highshelf", 1500, 0.7); revShelf.gain.value = -5;
-  const cv = ac.createConvolver(); cv.buffer = makeImpulse(5);
+  const cv = ac.createConvolver(); cv.buffer = makeImpulse(4);
   revGain = G(0.8);
   conv.connect(revShelf).connect(cv).connect(revGain).connect(comp);
   hp.connect(conv);
@@ -281,6 +281,29 @@ function initAudio() {
 const pitched = new Set();
 function linkPitch(o, det = 0) { o._det = det; o.detune.value = det + bendSent; pitched.add(o); }
 function unlinkPitch(o) { pitched.delete(o); }
+// 音程を書き換える：先の予定を消して目標へなめらかに寄せ、最後に「固定値」で締める。
+// 締めないと、目標に近づき続ける計算が音の部品ごとに毎サンプル残り続けて重くなる
+function writeDetune(o, t, tc) {
+  const v = o._det + bendSent, p = o.detune;
+  p.cancelScheduledValues(t);
+  if (tc > 0) { p.setTargetAtTime(v, t, tc); p.setValueAtTime(v, t + tc * 6); }
+  else p.setValueAtTime(v, t);
+}
+/* 鳴っていない声は、音の流れから外して眠らせる（外れた部品はブラウザが計算しない）。
+   部品を作り直すわけではないので、作る瞬間の負荷の山は出ない */
+function sleepVoice(vo) {
+  if (!vo.awake) return;
+  vo.awake = false;
+  for (const [node] of vo.outs) node.disconnect();
+  for (const o of vo.oscs) pitched.delete(o);
+}
+function wakeVoice(vo) {
+  if (vo.awake) return;
+  vo.awake = true;
+  for (const [node, dest] of vo.outs) node.connect(dest);
+  const t = ac.currentTime;
+  for (const o of vo.oscs) { pitched.add(o); writeDetune(o, t, 0); }
+}
 
 /* ---------- マス目（1マス＝土台の1声） ---------- */
 let GX = 6, GY = 4, gridSpec = "6x4";
@@ -465,11 +488,15 @@ function tick() {
     }
   }
   // 音程の沈み／浮き：指の動きをそのまま毎回送らず、ここで1/15秒ごとにまとめて送る
-  if (bendTarget !== bendSent) {
-    const tc = bendId === null ? 0.5 : 0.25;
-    for (const o of pitched) o.detune.setTargetAtTime(o._det + bendTarget, t, tc);
+  // 細かすぎる変化（12セント未満）は送らない。指を離したときの「0へ戻る」は必ず送る
+  if (bendTarget !== bendSent && (Math.abs(bendTarget - bendSent) >= 12 || bendTarget === 0)) {
     bendSent = bendTarget;
+    const tc = bendId === null ? 0.5 : 0.25;
+    for (const o of pitched) writeDetune(o, t, tc);
   }
+  // 鳴り終わった声を眠らせる
+  for (const vo of notePool) if (vo.awake && t > vo.busyUntil) sleepVoice(vo);
+  for (const vo of piano) if (vo.awake && t > vo.freeAt) sleepVoice(vo);
 
   // 暗い画面ほどこもり、明るい画面ほどひらける
   warm.frequency.setTargetAtTime(1600 * Math.pow(3.4, clamp(scene.mean * 1.2, 0, 1)), t, 1.5);
@@ -529,11 +556,15 @@ function initNotePool() {
     o.connect(oG).connect(lp); saw.connect(sawG).connect(lp);
     lp.connect(env);
     let pan = null;
-    if (ac.createStereoPanner) { pan = ac.createStereoPanner(); env.connect(pan).connect(bus); } else env.connect(bus);
-    sh.connect(shG).connect(shimmer);   // 1オクターブ上のきらめきは残響の中だけで鳴る
+    if (ac.createStereoPanner) { pan = ac.createStereoPanner(); pan.connect(bus); }
+    sh.connect(shG);   // 1オクターブ上のきらめきは残響の中だけで鳴る
     linkPitch(o, 0); linkPitch(saw, 7); linkPitch(sh, 0);
     o.start(); saw.start(); sh.start();
-    notePool.push({ o, saw, sh, oG, sawG, shG, lp, env, pan, startAt: -1, busyUntil: 0, m: -1 });
+    const vo = { o, saw, sh, oG, sawG, shG, lp, env, pan, startAt: -1, busyUntil: 0, m: -1,
+                 awake: true, outs: [[env, pan || bus], [shG, shimmer]], oscs: [o, saw, sh] };
+    for (const [node, dest] of vo.outs) node.connect(dest);
+    sleepVoice(vo);
+    notePool.push(vo);
   }
 }
 // その時刻から先の予定を消し、今の値から続ける（値が飛ばないのでプツッとしない）
@@ -567,6 +598,7 @@ function breathNote(ci, dur, T, K, pcsFor, coh, breath) {
     t = now + 0.3;
   }
   const tRel = t + atk + hold;
+  wakeVoice(vo);
   vo.m = m; vo.startAt = t; vo.busyUntil = tRel + rel * 1.6;
   glow[ci] = 1; glowNote[ci] = NOTE_NAMES[((Math.round(midi) % 12) + 12) % 12] + (Math.floor(Math.round(midi) / 12) - 1);
 
@@ -650,9 +682,12 @@ function initPiano() {
     o.connect(wG).connect(lp); s2.connect(sG).connect(lp);
     lp.connect(env);
     let pan = null;
-    if (ac.createStereoPanner) { pan = ac.createStereoPanner(); env.connect(pan).connect(pbus); } else env.connect(pbus);
+    if (ac.createStereoPanner) { pan = ac.createStereoPanner(); pan.connect(pbus); }
     linkPitch(o, 0); linkPitch(s2, 1.8); o.start(); s2.start();
-    piano.push({ o, s2, wG, sG, lp, env, pan, startAt: -1 });
+    const vo = { o, s2, wG, sG, lp, env, pan, startAt: -1, freeAt: 0, awake: true, outs: [[env, pan || pbus]], oscs: [o, s2] };
+    env.connect(pan || pbus);
+    sleepVoice(vo);
+    piano.push(vo);
   }
   // ハンマーの「コツッ」：ノイズを短く切り出す（2つを使い回す）
   const src = ac.createBufferSource(); src.buffer = noiseBuf; src.loop = true; src.start();
@@ -667,6 +702,7 @@ let hammerIdx = 0;
 // round=true：旋律の単音用。倍音を抑えてサイン寄りにし、立ち上がりを少し遅く、すぐ丸くこもる「ポーン」という音
 function pianoNote(midi, vel, t, pan = 0, round = false) {
   const vo = piano.reduce((a, b) => (a.startAt <= b.startAt ? a : b));   // いちばん古い声を使う
+  wakeVoice(vo);
   const f = midiToFreq(midi);
   // 前の音が残っていたら、打つ直前の15msで消す
   const e = vo.env.gain;
@@ -682,6 +718,7 @@ function pianoNote(midi, vel, t, pan = 0, round = false) {
   e.linearRampToValueAtTime(peak, t + (round ? 0.014 : 0.006));
   e.setTargetAtTime(peak * (round ? 0.5 : 0.35), t + 0.015, round ? 0.4 : 0.25);
   e.setTargetAtTime(0, t + 0.5, tau);
+  vo.freeAt = t + 0.5 + tau * 6;   // ここまでに聞こえなくなるので、そのあと眠らせる
   // フェルト：強く打つほど明るく、すぐこもっていく（丸い音は最初からこもらせ、高い音ほど早く丸める）
   const lpf = vo.lp.frequency;
   if (lpf.cancelAndHoldAtTime) lpf.cancelAndHoldAtTime(t); else lpf.cancelScheduledValues(t);
