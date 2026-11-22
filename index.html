@@ -231,9 +231,14 @@ function initAudio() {
   bus.connect(wob).connect(G(0.9)).connect(sat).connect(warm).connect(hp);
   hp.connect(G(0.5)).connect(comp);
   // 残響：長さを8秒→5秒にして軽く（余韻の長さはテープエコーの繰り返しでも補う）
-  conv = ac.createConvolver(); conv.buffer = makeImpulse(5);
+  // 残響に入る音は、先に高域を丸めておく（高い音が残響で重なっても耳に痛くならないように）。
+  // conv はこの「残響の入口」で、エコー・きらめき・粒もここを通って残響へ入る
+  conv = BQ("lowpass", 2600, 0.5);
+  const revShelf = BQ("highshelf", 1500, 0.7); revShelf.gain.value = -5;
+  const cv = ac.createConvolver(); cv.buffer = makeImpulse(5);
   revGain = G(0.8);
-  hp.connect(conv); conv.connect(revGain).connect(comp);
+  conv.connect(revShelf).connect(cv).connect(revGain).connect(comp);
+  hp.connect(conv);
   const dl = ac.createDelay(2); dl.delayTime.value = 0.68;
   const fb = G(0.42), elp = BQ("lowpass", 2200, 0.5);
   hp.connect(G(0.35)).connect(dl); dl.connect(elp).connect(fb).connect(dl);
@@ -426,7 +431,7 @@ function tick() {
   for (let i = 0; i < n; i++) {
     const p = pads[i], c = cells[i];
     if (!p) continue;
-    const free = 45 + Math.pow(c.v, 0.9) * 28 + (c.h / 360) * 12 * smooth(0.04, 0.2, c.s);
+    const free = 45 + Math.pow(c.v, 0.9) * 24 + (c.h / 360) * 8 * smooth(0.04, 0.2, c.s);   // 高くなりすぎない範囲（〜F5）
     const pcs = pcsFor(free, c.s);
     let snap = nearestTone(free, K.rootPc, pcs);
     if (p.snap !== null && pcs.includes((((p.snap - K.rootPc) % 12) + 12) % 12) &&
@@ -467,7 +472,7 @@ function tick() {
   }
 
   // 暗い画面ほどこもり、明るい画面ほどひらける
-  warm.frequency.setTargetAtTime(1600 * Math.pow(4.5, clamp(scene.mean * 1.2, 0, 1)), t, 1.5);
+  warm.frequency.setTargetAtTime(1600 * Math.pow(3.4, clamp(scene.mean * 1.2, 0, 1)), t, 1.5);
   padLP.frequency.setTargetAtTime(900 * Math.pow(3, clamp(scene.mean * 1.2, 0, 1)), t, 1.5);
   revGain.gain.setTargetAtTime(+revEl.value * 1.15, t, 0.2);
   // 持続音
@@ -543,9 +548,10 @@ function breathNote(ci, dur, T, K, pcsFor, coh, breath) {
   const c = cells[ci];
   if (!c || !notePool.length) return;
   const now = ac.currentTime;
-  const free = 50 + Math.pow(c.v, 0.9) * 26 + (c.h / 360) * 12 * smooth(0.05, 0.2, c.s);
+  const free = 50 + Math.pow(c.v, 0.9) * 22 + (c.h / 360) * 7 * smooth(0.05, 0.2, c.s);   // 〜G5 まで
   let m = nearestTone(free, K.rootPc, pcsFor(free, c.s));
-  while (isSounding(m, now) && m < 90) m += 12;
+  if (isSounding(m, now)) m = isSounding(m - 12, now) || m - 12 < 48 ? m + 12 : m - 12;   // 重なったら、まず下のオクターブへ
+  if (m > 81) m -= 12;
   const midi = lerp(free, m, coh);   // まとまりが低いほど、構成音から滲んだ高さで鳴る
   const f = midiToFreq(midi), s = c.s, v = c.v;
   const atk = lerp(3.5, 0.8, breath), rel = lerp(6, 2.5, breath), hold = Math.max(0.4, dur - atk);
@@ -573,11 +579,11 @@ function breathNote(ci, dur, T, K, pcsFor, coh, breath) {
   vo.sawG.gain.setValueAtTime(sawL > 0.06 ? sawL : 0, t);
   if (vo.pan) vo.pan.pan.setValueAtTime(((ci % GX) / Math.max(1, GX - 1) * 2 - 1) * 0.7, t);
   // きらめき（明るいマスほど）
-  vo.shG.gain.setTargetAtTime(v > 0.45 ? 0.05 * smooth(0.4, 0.9, v) : 0, t + atk * 0.5, atk / 2);
+  vo.shG.gain.setTargetAtTime(v > 0.45 && midi < 74 ? 0.022 * smooth(0.4, 0.9, v) : 0, t + atk * 0.5, atk / 2);   // 高い音には足さない
   vo.shG.gain.setTargetAtTime(0, tRel, rel / 4);
   // フィルターが息をするように開いて閉じる
   vo.lp.frequency.setValueAtTime(f * 1.2, t);
-  vo.lp.frequency.setTargetAtTime(Math.min(12000, f * (2 + 6 * s) * (0.6 + 0.6 * v)), t, atk / 2);
+  vo.lp.frequency.setTargetAtTime(Math.min(4500, f * (2 + 5 * s) * (0.6 + 0.5 * v)), t, atk / 2);
   vo.lp.frequency.setTargetAtTime(f * 1.1, tRel, rel / 3);
   // 満ちて引く
   const peak = 0.13 * (0.55 + 0.45 * v);
@@ -638,11 +644,15 @@ function initPiano() {
     const o = ac.createOscillator(); o.setPeriodicWave(wave); o.frequency.value = 220;
     const lp = ac.createBiquadFilter(); lp.type = "lowpass"; lp.Q.value = 0.3; lp.frequency.value = 800;
     const env = ac.createGain(); env.gain.value = 0;
-    o.connect(lp).connect(env);
+    // 本物のピアノは1つの音に弦が2〜3本あり、わずかにずれてうなる。サイン波を1本、少しずらして重ねる
+    const s2 = ac.createOscillator(); s2.type = "sine"; s2.frequency.value = 220;
+    const wG = ac.createGain(), sG = ac.createGain(); wG.gain.value = 1; sG.gain.value = 0.25;
+    o.connect(wG).connect(lp); s2.connect(sG).connect(lp);
+    lp.connect(env);
     let pan = null;
     if (ac.createStereoPanner) { pan = ac.createStereoPanner(); env.connect(pan).connect(pbus); } else env.connect(pbus);
-    linkPitch(o, 0); o.start();
-    piano.push({ o, lp, env, pan, startAt: -1 });
+    linkPitch(o, 0); linkPitch(s2, 1.8); o.start(); s2.start();
+    piano.push({ o, s2, wG, sG, lp, env, pan, startAt: -1 });
   }
   // ハンマーの「コツッ」：ノイズを短く切り出す（2つを使い回す）
   const src = ac.createBufferSource(); src.buffer = noiseBuf; src.loop = true; src.start();
@@ -654,7 +664,8 @@ function initPiano() {
   });
 }
 let hammerIdx = 0;
-function pianoNote(midi, vel, t, pan = 0) {
+// round=true：旋律の単音用。倍音を抑えてサイン寄りにし、立ち上がりを少し遅く、すぐ丸くこもる「ポーン」という音
+function pianoNote(midi, vel, t, pan = 0, round = false) {
   const vo = piano.reduce((a, b) => (a.startAt <= b.startAt ? a : b));   // いちばん古い声を使う
   const f = midiToFreq(midi);
   // 前の音が残っていたら、打つ直前の15msで消す
@@ -662,23 +673,31 @@ function pianoNote(midi, vel, t, pan = 0) {
   if (e.cancelAndHoldAtTime) e.cancelAndHoldAtTime(t - 0.015); else e.cancelScheduledValues(t - 0.015);
   e.linearRampToValueAtTime(0, t);
   vo.o.frequency.setValueAtTime(f, t);
+  vo.s2.frequency.setValueAtTime(f, t);
+  vo.wG.gain.setValueAtTime(round ? 0.45 : 1, t);
+  vo.sG.gain.setValueAtTime(round ? 0.8 : 0.25, t);
   if (vo.pan) vo.pan.pan.setValueAtTime(pan, t);
-  // 打鍵：すぐ立ち上がり、低い音ほど長く減衰する
-  const peak = 0.22 * vel, tau = clamp(2.6 - (midi - 48) * 0.05, 0.7, 3.2);
-  e.linearRampToValueAtTime(peak, t + 0.006);
-  e.setTargetAtTime(peak * 0.35, t + 0.006, 0.25);
+  // 打鍵：すぐ立ち上がり、低い音ほど長く減衰する（丸い音は少しだけ長く響かせる）
+  const peak = 0.22 * vel, tau = clamp(2.6 - (midi - 48) * 0.05, 0.7, 3.2) * (round ? 1.3 : 1);
+  e.linearRampToValueAtTime(peak, t + (round ? 0.014 : 0.006));
+  e.setTargetAtTime(peak * (round ? 0.5 : 0.35), t + 0.015, round ? 0.4 : 0.25);
   e.setTargetAtTime(0, t + 0.5, tau);
-  // フェルト：強く打つほど明るく、すぐこもっていく
+  // フェルト：強く打つほど明るく、すぐこもっていく（丸い音は最初からこもらせ、高い音ほど早く丸める）
   const lpf = vo.lp.frequency;
   if (lpf.cancelAndHoldAtTime) lpf.cancelAndHoldAtTime(t); else lpf.cancelScheduledValues(t);
-  lpf.setValueAtTime(Math.min(9000, f * (2.5 + 5 * vel)), t);
-  lpf.setTargetAtTime(Math.min(4000, f * 1.6), t + 0.01, 0.5);
+  if (round) {
+    lpf.setValueAtTime(Math.min(3200, f * (1.6 + 1.6 * vel)), t);
+    lpf.setTargetAtTime(Math.min(2000, f * 1.08), t + 0.01, 0.25);
+  } else {
+    lpf.setValueAtTime(Math.min(6000, f * (2.5 + 5 * vel)), t);
+    lpf.setTargetAtTime(Math.min(3000, f * 1.6), t + 0.01, 0.5);
+  }
   vo.startAt = t;
   const h = hammer[hammerIdx++ % hammer.length];
   if (h.g.gain.cancelAndHoldAtTime) h.g.gain.cancelAndHoldAtTime(t); else h.g.gain.cancelScheduledValues(t);
-  h.bp.frequency.setValueAtTime(Math.min(5000, f * 4), t);
-  h.g.gain.linearRampToValueAtTime(0.05 * vel, t + 0.002);
-  h.g.gain.setTargetAtTime(0, t + 0.004, 0.008);
+  h.bp.frequency.setValueAtTime(Math.min(round ? 2500 : 5000, f * (round ? 2.5 : 4)), t);
+  h.g.gain.linearRampToValueAtTime((round ? 0.025 : 0.05) * vel, t + 0.002);
+  h.g.gain.setTargetAtTime(0, t + 0.004, round ? 0.012 : 0.008);
 }
 
 // スケールの中で3度ずつ積んだ和音（rootIdx はスケールの何番目の音から積むか）
@@ -704,9 +723,9 @@ function chooseChords(steps, hueGap) {
 // 旋律：明るく鮮やかなマスを目指して、ほとんど隣の音へ。たまに下へ跳ぶ
 function melodyNote(K, steps) {
   const ci = pickCell(), c = cells[ci];
-  const target = 62 + Math.pow(c.v, 0.9) * 16 + (c.h / 360) * 6 * smooth(0.05, 0.2, c.s);
+  const target = 60 + Math.pow(c.v, 0.9) * 14 + (c.h / 360) * 4 * smooth(0.05, 0.2, c.s);
   const sc = [];
-  for (let m = 58; m <= 86; m++) if (steps.includes(((m - K.rootPc) % 12 + 12) % 12)) sc.push(m);
+  for (let m = 57; m <= 79; m++) if (steps.includes(((m - K.rootPc) % 12 + 12) % 12)) sc.push(m);
   const near = x => sc.reduce((bi, m, i) => (Math.abs(m - x) < Math.abs(sc[bi] - x) ? i : bi), 0);
   let i = near(sat.mel), ti = near(target);
   const r = Math.random();
@@ -716,7 +735,7 @@ function melodyNote(K, steps) {
   i = clamp(i, 0, sc.length - 1);
   sat.mel = sc[i];
   glow[ci] = Math.max(glow[ci], 0.8); glowNote[ci] = NOTE_NAMES[sat.mel % 12] + (Math.floor(sat.mel / 12) - 1);
-  return { m: sat.mel, v: 0.42 + Math.random() * 0.12, dt: 0, pan: 0.15 };
+  return { m: sat.mel, v: 0.42 + Math.random() * 0.12, dt: 0, pan: 0.15, round: true };
 }
 const voiceNear = (pc, center) => { let m = center - 6; while (((m % 12) + 12) % 12 !== pc) m++; return m; };
 
@@ -761,7 +780,7 @@ function satieTick(K, steps, hueGap, motion, breath) {
         if (locked && sat.history.length === 12 && sat.beat === 2) { sat.loop = sat.history.slice(); sat.loopPos = 0; }
       }
       if (!locked) sat.loop = null;
-      for (const n of notes) pianoNote(n.m, n.v, t + n.dt, n.pan);
+      for (const n of notes) pianoNote(n.m, n.v, t + n.dt, n.pan, n.round);
       // 少しだけ揺れるテンポ。フレーズの終わりはゆっくり
       let d = beatLen * (1 + (Math.random() - 0.5) * 0.06);
       if (sat.bar % 8 === 7 && sat.beat === 2) d *= 1.3;
@@ -781,7 +800,7 @@ function satieTick(K, steps, hueGap, motion, breath) {
         continue;
       }
       const n = melodyNote(K, steps);
-      pianoNote(n.m, n.v, t, n.pan);
+      pianoNote(n.m, n.v, t, n.pan, true);
       sat.left--;
       sat.nextT += beatLen * [0.5, 0.75, 1, 1, 1.5, 2][(Math.random() * 6) | 0];
     }
