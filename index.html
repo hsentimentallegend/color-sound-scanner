@@ -436,11 +436,17 @@ function tick() {
   // 触れている場所から湧き出す音
   for (const [, p] of pointers) {
     if (!p.active) continue;
-    const ci = cellAt(p.x, p.y), every = lerp(2.4, 0.9, breath) * 1000;
-    if (ci !== p.cell ? now - p.lastNote > 350 : now - p.lastNote > every) {
+    // なぞって別のマスへ移ったら0.6秒ごと、同じ場所で押さえ続けたら数秒ごと。触れて鳴らす音は短めの余韻で
+    const ci = cellAt(p.x, p.y), every = lerp(2.6, 1.3, breath) * 1000;
+    if (ci !== p.cell ? now - p.lastNote > 600 : now - p.lastNote > every) {
       p.cell = ci; p.lastNote = now;
-      breathNote(ci, lerp(4, 2, breath), T, K, pcsFor, coh, Math.max(breath, 0.6));
+      breathNote(ci, lerp(3, 1.6, breath), T, K, pcsFor, coh, Math.max(breath, 0.65));
     }
+  }
+  // 音程の沈み／浮き：指の動きをそのまま毎回送らず、ここで1/15秒ごとにまとめて送る
+  if (bend && bendTarget !== bendSent) {
+    bend.offset.setTargetAtTime(bendTarget, t, bendId === null ? 0.5 : 0.25);
+    bendSent = bendTarget;
   }
 
   // 暗い画面ほどこもり、明るい画面ほどひらける
@@ -481,7 +487,7 @@ function pickCell() {
   for (let i = 0; i < w.length; i++) { r -= w[i]; if (r <= 0) return i; }
   return w.length - 1;
 }
-// 呼吸する音：数秒かけて満ちて引く。サイン波＋三角波、鮮やかなマスほどやわらかいノコギリ波が混ざる
+// 呼吸する音：数秒かけて満ちて引く。サイン波が中心、鮮やかなマスほどやわらかいノコギリ波が混ざる
 function breathNote(ci, dur, T, K, pcsFor, coh, breath) {
   const c = cells[ci];
   if (!c) return;
@@ -496,27 +502,36 @@ function breathNote(ci, dur, T, K, pcsFor, coh, breath) {
   const tRel = t + atk + hold, tEnd = tRel + rel * 1.6;
   glow[ci] = 1; glowNote[ci] = NOTE_NAMES[((Math.round(midi) % 12) + 12) % 12] + (Math.floor(Math.round(midi) / 12) - 1);
 
+  // 同時に鳴る音の数に上限を設ける（重なりすぎると端末の処理が追いつかず、音がブツブツ途切れる）。
+  // 上限に達したら、いちばん古い音を0.3秒ほどでそっと消してから入れ替える
+  while (notes.length >= MAX_NOTES) retire(notes.shift());
+
   const env = ac.createGain(); env.gain.value = 0;
+  const kill = ac.createGain(); kill.gain.value = 1;   // 入れ替えで消すとき専用（env の予定とぶつからない）
   const lp = ac.createBiquadFilter(); lp.type = "lowpass"; lp.Q.value = 0.4;
-  let out = env;
-  if (ac.createStereoPanner) { out = ac.createStereoPanner(); out.pan.value = ((ci % GX) / Math.max(1, GX - 1) * 2 - 1) * 0.7; env.connect(out); }
-  lp.connect(env); out.connect(bus);
+  let out = kill;
+  if (ac.createStereoPanner) { out = ac.createStereoPanner(); out.pan.value = ((ci % GX) / Math.max(1, GX - 1) * 2 - 1) * 0.7; kill.connect(out); }
+  lp.connect(env).connect(kill); out.connect(bus);
   const oscs = [];
   const add = (type, mult, level, det, dest) => {
     const o = ac.createOscillator(); o.type = type; o.frequency.value = f * mult; o.detune.value = det;
     const g = ac.createGain(); g.gain.value = level; o.connect(g).connect(dest);
     linkPitch(o); o.start(t); o.stop(tEnd); oscs.push(o);
   };
-  add("sine", 1, 1 - 0.55 * s, 0, lp);
-  add("triangle", 1, 0.3, 3, lp);
+  // 部品は必要なものだけ：サイン波1本＋（鮮やかなマスだけ）ノコギリ波2本＋（明るいマスだけ）きらめき
+  add("sine", 1, 1.1 - 0.55 * s, 0, lp);
   const sawL = Math.pow(s, 1.2) * 0.4;
-  if (sawL > 0.04) { add("sawtooth", 1, sawL, -8, lp); add("sawtooth", 1, sawL, 8, lp); }
+  if (sawL > 0.06) { add("sawtooth", 1, sawL, -8, lp); add("sawtooth", 1, sawL, 8, lp); }
   // 1オクターブ上のきらめき（明るいマスほど）。残響の中だけで鳴る
-  const shG = ac.createGain(); shG.gain.value = 0; shG.connect(shimmer);
-  add("sine", 2, 1, 0, shG);
-  shG.gain.setValueAtTime(0, t);
-  shG.gain.setTargetAtTime(0.05 * smooth(0.4, 0.9, v), t + atk * 0.5, atk / 2);
-  shG.gain.setTargetAtTime(0, tRel, rel / 4);
+  const shG = ac.createGain(); shG.gain.value = 0;
+  const shKill = ac.createGain(); shKill.gain.value = 1;
+  shG.connect(shKill).connect(shimmer);
+  if (v > 0.45) {
+    add("sine", 2, 1, 0, shG);
+    shG.gain.setValueAtTime(0, t);
+    shG.gain.setTargetAtTime(0.05 * smooth(0.4, 0.9, v), t + atk * 0.5, atk / 2);
+    shG.gain.setTargetAtTime(0, tRel, rel / 4);
+  }
   // フィルターが息をするように開いて閉じる
   lp.frequency.setValueAtTime(f * 1.2, t);
   lp.frequency.setTargetAtTime(Math.min(12000, f * (2 + 6 * s) * (0.6 + 0.6 * v)), t, atk / 2);
@@ -525,11 +540,25 @@ function breathNote(ci, dur, T, K, pcsFor, coh, breath) {
   env.gain.setValueAtTime(0, t);
   env.gain.setTargetAtTime(peak, t, atk / 3);
   env.gain.setTargetAtTime(0, tRel, rel / 4);
+  const note = { oscs, kill, shKill, m, done: false };
+  notes.push(note);
   oscs[0].onended = () => {
+    note.done = true;
+    const k = notes.indexOf(note); if (k >= 0) notes.splice(k, 1);
     sounding.delete(m);
     for (const o of oscs) unlinkPitch(o);
-    try { out.disconnect(); shG.disconnect(); } catch (_) {}
+    try { out.disconnect(); shKill.disconnect(); } catch (_) {}
   };
+}
+const MAX_NOTES = 8;
+const notes = [];   // 鳴っている呼吸の音（古い順）
+function retire(note) {
+  if (!note || note.done) return;
+  const t = ac.currentTime;
+  note.kill.gain.setTargetAtTime(0, t, 0.08);
+  note.shKill.gain.setTargetAtTime(0, t, 0.08);
+  for (const o of note.oscs) { try { o.stop(t + 0.5); } catch (_) {} }
+  sounding.delete(note.m);
 }
 // デジタルの粒：ノイズを構成音の高さで細く切り出した、短いきらめき
 function grain(T, K) {
@@ -592,10 +621,8 @@ function updateSwell() {
   }
 }
 // テープを手で遅くしたように、音程がゆっくり沈む／浮く（慣性があり、離すとゆっくり戻る）
-function setBend(cents, tc) {
-  if (!ac || !bend) return;
-  bend.offset.setTargetAtTime(cents, ac.currentTime, tc);
-}
+let bendTarget = 0, bendSent = 0;
+function setBend(cents) { bendTarget = Math.round(cents); }
 view.addEventListener("pointerdown", e => {
   if (!started) return;
   try { view.setPointerCapture(e.pointerId); } catch (_) {}
@@ -608,14 +635,14 @@ view.addEventListener("pointermove", e => {
   if (!p.active && Math.hypot(p.x - p.x0, p.y - p.y0) > MOVE_PX) activate(p, e.pointerId);
   if (e.pointerId === bendId) {
     const k = clamp(-(p.y - p.y0) / (innerHeight * 0.4), -1, 1);   // 下へ引く＝沈む、上へ＝浮く（画面の40%で7半音）
-    setBend(k * 700, 0.25);
+    setBend(k * 700);
   }
 });
 function endPointer(e, cancelled) {
   const p = pointers.get(e.pointerId);
   if (!p) return;
   pointers.delete(e.pointerId);
-  if (e.pointerId === bendId) { bendId = null; setBend(0, 0.5); }
+  if (e.pointerId === bendId) { bendId = null; setBend(0); }
   if (!cancelled && !p.active && performance.now() - p.t0 < 350) focusAt(e.clientX, e.clientY);
 }
 view.addEventListener("pointerup", e => endPointer(e, false));
