@@ -1,0 +1,572 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>Color Sound Scanner</title>
+<style>
+  :root { --fg:#fff; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; height:100%; background:#000; color:var(--fg);
+    font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif; overflow:hidden;
+    -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
+  #view { position:fixed; inset:0; width:100%; height:100%; display:block; touch-action:none; }
+  video, #ana { display:none; }
+
+  #key { position:fixed; right:12px; top:calc(env(safe-area-inset-top) + 8px); font-size:13px; text-align:right;
+    text-shadow:0 1px 3px #000; pointer-events:none; opacity:.92; line-height:1.5; }
+  #key[data-note]::after { content:attr(data-note); display:block; font-size:11px; opacity:.8; }
+  #hint { position:fixed; left:12px; top:calc(env(safe-area-inset-top) + 8px); font-size:11px; opacity:.7;
+    text-shadow:0 1px 3px #000; pointer-events:none; line-height:1.5; max-width:50vw; }
+  #focusRing { position:fixed; width:72px; height:72px; margin:-36px 0 0 -36px; border:2px solid #ffd54a; border-radius:8px;
+    pointer-events:none; opacity:0; transform:scale(1.4); transition:opacity .2s, transform .25s; }
+  #focusRing.show { opacity:1; transform:scale(1); }
+  #focusRing.fail { border-color:rgba(255,255,255,.5); }
+
+  #ui { position:fixed; left:0; right:0; bottom:0; padding:10px 16px calc(env(safe-area-inset-bottom) + 14px);
+    display:flex; flex-direction:column; align-items:center; gap:6px; pointer-events:none;
+    background:linear-gradient(transparent, rgba(0,0,0,.6) 40%); }
+  #ui > * { pointer-events:auto; }
+  .row { width:100%; max-width:480px; display:grid; grid-template-columns:4.8em 1fr 4.8em; align-items:center; gap:8px;
+    font-size:13px; text-shadow:0 1px 2px #000; }
+  .row span:last-child { text-align:right; }
+  input[type=range] { width:100%; height:30px; accent-color:#fff; }
+  .seg { display:flex; border:1px solid rgba(255,255,255,.7); border-radius:16px; overflow:hidden; }
+  .seg button { flex:1; height:30px; border:0; background:transparent; color:#fff; font-size:12px; cursor:pointer;
+    touch-action:manipulation; }
+  .seg button.on { background:#fff; color:#000; font-weight:600; }
+  .btns { display:flex; align-items:center; justify-content:center; gap:22px; margin-top:4px; }
+  .btns .pad { width:60px; }
+  #scan { width:84px; height:84px; border-radius:50%; border:3px solid #fff; background:#222;
+    color:#fff; font-size:16px; font-weight:700; letter-spacing:.05em; cursor:pointer;
+    box-shadow:0 4px 18px rgba(0,0,0,.6); transition:background .6s, transform .08s; touch-action:manipulation; }
+  #scan:active { transform:scale(.95); }
+  #scan.on { box-shadow:0 0 18px rgba(255,255,255,.8); }
+  #loop { width:60px; height:60px; border-radius:50%; border:2px solid rgba(255,255,255,.75); background:rgba(0,0,0,.4);
+    color:#fff; font-size:13px; font-weight:600; line-height:1.15; cursor:pointer; touch-action:manipulation;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; transition:transform .08s; }
+  #loop small { font-size:10px; font-weight:400; opacity:.85; }
+  #loop:active { transform:scale(.94); }
+  #loop.on { border:3px solid #fff; box-shadow:0 0 14px rgba(255,255,255,.7); }
+
+  #start { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:14px; background:#000; z-index:10; text-align:center; padding:24px; cursor:pointer; }
+  #start h1 { margin:0; font-size:26px; font-weight:600; letter-spacing:.04em; }
+  #start p { margin:0; opacity:.7; font-size:14px; line-height:1.7; }
+  #msg { color:#f88; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<video id="video" playsinline muted autoplay></video>
+<canvas id="ana"></canvas>
+
+<div id="hint">ボタン：スキャン開始／停止<br>タップ：焦点</div>
+<div id="key"></div>
+<div id="focusRing"></div>
+
+<div id="ui">
+  <div class="row"><span>速さ</span><input id="speed" type="range" min="0" max="1" step="0.01" value="0.45"><span id="speedL">6.0秒</span></div>
+  <div class="row"><span>密度</span><input id="dens" type="range" min="0" max="1" step="0.01" value="0.5"><span id="densL">ふつう</span></div>
+  <div class="row"><span>残響</span><input id="rev" type="range" min="0" max="1" step="0.01" value="0.5"><span id="revL">50%</span></div>
+  <div class="row"><span>向き</span><div class="seg" id="dirSeg">
+    <button data-d="x" class="on">横へ</button><button data-d="y">下へ</button>
+  </div><span id="dirL"></span></div>
+  <div class="row"><span>細かさ</span><div class="seg" id="resSeg">
+    <button data-r="0">粗い</button><button data-r="1" class="on">ふつう</button><button data-r="2">細かい</button>
+  </div><span id="resL">12×16</span></div>
+  <div class="btns"><button id="loop">ループ<small>オフ</small></button><button id="scan">スキャン</button><span class="pad"></span></div>
+</div>
+
+<div id="start">
+  <h1>Color Sound Scanner</h1>
+  <p>ボタンを押すと、スキャンバーが画面を横切り、<br>通った場所の色を順に鳴らします。<br>タップしてカメラを開始（PCはスペースキーでスキャン）</p>
+  <p id="msg"></p>
+</div>
+
+<script>
+(() => {
+"use strict";
+/* ---------- 設定 ---------- */
+const CELL_PX = 6;                                  // 解析用キャンバスでの1マスのピクセル数
+const RES = [{ lanes: 8, steps: 12 }, { lanes: 12, steps: 16 }, { lanes: 16, steps: 24 }];   // 音の高さの段数 × 時間の刻み
+const VOICES = 12;                                  // 同時に鳴らせる音の数
+const MAX_ONSETS = 4;                               // 1刻みで新しく鳴らす音の上限
+
+const $ = id => document.getElementById(id);
+const view = $("view"), vctx = view.getContext("2d");
+const video = $("video");
+const ana = $("ana"), actx2d = ana.getContext("2d", { willReadFrequently: true });
+const snap = document.createElement("canvas"), sctx = snap.getContext("2d");   // スキャン中に止めて見せる1枚
+const keyEl = $("key"), scanBtn = $("scan"), loopBtn = $("loop"), ring = $("focusRing");
+const speedEl = $("speed"), densEl = $("dens"), revEl = $("rev");
+
+/* ---------- 便利関数 ---------- */
+function rgb2hsv(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+  let h = 0;
+  if (d > 0) {
+    if (mx === r) h = ((g - b) / d) % 6;
+    else if (mx === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60; if (h < 0) h += 360;
+  }
+  return [h, mx ? d / mx : 0, mx];
+}
+const lerp = (a, b, t) => a + (b - a) * t;
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const smooth = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+const midiToFreq = m => 440 * Math.pow(2, (m - 69) / 12);
+const freqToMidi = f => Math.round(69 + 12 * Math.log2(f / 440));
+const hueDist = (a, b) => { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
+
+/* ---------- 色 → 感情 → 調（Color Sound Generator のルール） ---------- */
+const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const SCALES = {
+  major:            { steps: [0, 2, 4, 5, 7, 9, 11], ja: 'メジャー' },
+  minor:            { steps: [0, 2, 3, 5, 7, 8, 10], ja: 'マイナー' },
+  pentatonic_major: { steps: [0, 2, 4, 7, 9],        ja: 'メジャー・ペンタトニック' },
+  pentatonic_minor: { steps: [0, 3, 5, 7, 10],       ja: 'マイナー・ペンタトニック' },
+  blues:            { steps: [0, 3, 5, 6, 7, 10],    ja: 'ブルース' }
+};
+function classify(h, chroma, v) {
+  if (!chroma) {
+    if (v > 0.8) return { emotion: 'Clarity', baseFreq: 650, scale: 'major' };
+    if (v < 0.2) return { emotion: 'Depth', baseFreq: 120, scale: 'minor' };
+    return { emotion: 'Neutral', baseFreq: 200 + v * 250, scale: v > 0.6 ? 'pentatonic_major' : 'pentatonic_minor' };
+  }
+  if (h < 0.05 || h >= 0.95) return { emotion: 'Passion', baseFreq: 550 + v * 100, scale: v > 0.5 ? 'major' : 'blues' };
+  if (h < 0.15) return { emotion: 'Warmth', baseFreq: 500 + v * 100, scale: 'major' };
+  if (h < 0.25) return { emotion: 'Joy', baseFreq: 480 + v * 120, scale: 'pentatonic_major' };
+  if (h < 0.35) return { emotion: 'Freshness', baseFreq: 450 + v * 100, scale: 'major' };
+  if (h < 0.45) return { emotion: 'Peace', baseFreq: 400 + v * 100, scale: v > 0.5 ? 'pentatonic_major' : 'pentatonic_minor' };
+  if (h < 0.55) return { emotion: 'Calm', baseFreq: 350 + v * 100, scale: v > 0.6 ? 'major' : 'minor' };
+  if (h < 0.70) return { emotion: 'Melancholy', baseFreq: 300 + v * 100, scale: 'minor' };
+  if (h < 0.85) return { emotion: 'Mystery', baseFreq: 280 + v * 120, scale: 'blues' };
+  return { emotion: 'Creativity', baseFreq: 600 + v * 150, scale: v > 0.5 ? 'major' : 'minor' };
+}
+
+/* ---------- オーディオ ----------
+   色相で楽器の性格が変わる：
+     赤・橙（暖色）→ 木を叩くマリンバ風（短く、4倍の倍音がコツッと鳴る）
+     黄・緑・水色   → ピアノ風（ほどよく伸びる）
+     青・紫（寒色）→ ベル風（2.76倍の、整数倍でない倍音が長く残る）
+   彩度＝強さ、明るさ＝音色の明るさ。白っぽいマスは小さなノイズの粒、黒いマスは無音。
+   声は最初に作っておき、鳴っていない声は音の流れから外して眠らせる（軽さのため） */
+let ac, master, bus, revGain, echo, echoFb, voices = [], ticks = [], bass, tickIdx = 0;
+let started = false, camTrack = null;
+
+const TIMBRE = [
+  { a: 0.7, b: 0.32, ratio: 4.0,   bTau: 0.04, tau: 0.22, sus: 0.0,  rel: 0.12, bright: 3.0, atk: 0.003 },  // マリンバ風
+  { a: 1.0, b: 0.18, ratio: 2.003, bTau: 0.5,  tau: 0.5,  sus: 0.3,  rel: 0.35, bright: 2.4, atk: 0.006 },  // ピアノ風
+  { a: 0.35, b: 0.55, ratio: 2.76, bTau: 1.4,  tau: 1.4,  sus: 0.22, rel: 1.4,  bright: 1.8, atk: 0.004 }   // ベル風
+];
+const timbreOf = h => (h < 45 || h >= 330 ? 0 : h < 195 ? 1 : 2);
+
+function makeImpulse(sec) {
+  const sr = ac.sampleRate, len = Math.floor(sr * sec), buf = ac.createBuffer(2, len, sr), atk = sr * 0.02;
+  for (let c = 0; c < 2; c++) {
+    const d = buf.getChannelData(c);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3) * Math.min(1, i / atk);
+  }
+  return buf;
+}
+function holdAt(p, t) {
+  if (p.cancelAndHoldAtTime) p.cancelAndHoldAtTime(t);
+  else { p.cancelScheduledValues(t); p.setValueAtTime(p.value, t); }
+}
+function initAudio() {
+  ac = new (window.AudioContext || window.webkitAudioContext)();
+  const G = v => { const g = ac.createGain(); g.gain.value = v; return g; };
+  const BQ = (type, f, q) => { const b = ac.createBiquadFilter(); b.type = type; b.frequency.value = f; b.Q.value = q; return b; };
+
+  const comp = ac.createDynamicsCompressor();
+  comp.threshold.value = -18; comp.ratio.value = 3; comp.knee.value = 10; comp.attack.value = 0.005; comp.release.value = 0.25;
+  const lim = ac.createDynamicsCompressor();
+  lim.threshold.value = -2; lim.ratio.value = 20; lim.knee.value = 0; lim.attack.value = 0.002; lim.release.value = 0.15;
+  master = G(1);
+  comp.connect(G(1.8)).connect(lim).connect(master).connect(ac.destination);
+
+  bus = G(1);
+  const hp = BQ("highpass", 50, 0.7);
+  bus.connect(hp);
+  hp.connect(comp);
+  // 残響（入口で高域を丸めて、重なっても痛くならないように）
+  const rin = BQ("lowpass", 3500, 0.5), cv = ac.createConvolver(); cv.buffer = makeImpulse(2.6);
+  revGain = G(0.5);
+  hp.connect(rin).connect(cv).connect(revGain).connect(comp);
+  // 刻みに合わせたエコー（付点のリズムで、うっすら）
+  echo = ac.createDelay(2); echo.delayTime.value = 0.5;
+  echoFb = G(0.28);
+  const elp = BQ("lowpass", 2400, 0.5);
+  hp.connect(G(0.22)).connect(echo); echo.connect(elp).connect(echoFb).connect(echo);
+  elp.connect(comp); elp.connect(rin);
+
+  // 音色の元：ピアノらしい倍音の並び
+  const amps = [0, 1, 0.42, 0.2, 0.11, 0.07, 0.045, 0.03, 0.018, 0.012];
+  const wave = ac.createPeriodicWave(new Float32Array(amps.length), new Float32Array(amps));
+  for (let i = 0; i < VOICES; i++) {
+    const oa = ac.createOscillator(); oa.setPeriodicWave(wave);
+    const ob = ac.createOscillator(); ob.type = "sine";
+    const aG = G(1), bG = G(0), lp = BQ("lowpass", 2000, 0.3), env = G(0);
+    oa.connect(aG).connect(lp); ob.connect(bG).connect(lp); lp.connect(env);
+    let pan = null;
+    if (ac.createStereoPanner) { pan = ac.createStereoPanner(); pan.connect(bus); }
+    oa.start(); ob.start();
+    voices.push({ oa, ob, aG, bG, lp, env, pan, dest: pan || bus, awake: false, startAt: -1, freeAt: 0 });
+  }
+  // 白っぽいマスの粒：ノイズを細く切り出す（2つを使い回す）
+  const nb = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate), nd = nb.getChannelData(0);
+  for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+  const ns = ac.createBufferSource(); ns.buffer = nb; ns.loop = true; ns.start();
+  for (let i = 0; i < 2; i++) {
+    const bp = BQ("bandpass", 5000, 2.5), g = G(0);
+    ns.connect(bp).connect(g);
+    let o = g, pan = null;
+    if (ac.createStereoPanner) { pan = ac.createStereoPanner(); g.connect(pan); o = pan; }
+    o.connect(bus);
+    ticks.push({ bp, g, pan });
+  }
+  // 低い土台：1回のスキャンのあいだ、調の主音をうっすら支える
+  const b1 = ac.createOscillator(), b2 = ac.createOscillator(), bg = G(0), b2g = G(0.25);
+  b1.type = "sine"; b2.type = "triangle"; b1.frequency.value = b2.frequency.value = 55;
+  b1.connect(bg); b2.connect(b2g).connect(bg); bg.connect(bus);
+  b1.start(); b2.start();
+  bass = { b1, b2, g: bg };
+}
+function wake(vo) { if (!vo.awake) { vo.env.connect(vo.dest); vo.awake = true; } }
+function sleep(vo) { if (vo.awake) { vo.env.disconnect(); vo.awake = false; } }
+
+// 1音を鳴らす（t：開始時刻、dur：同じ色が続く長さ）
+function playNote(midi, t, dur, h, s, v, pan) {
+  let vo = voices.find(x => x.freeAt <= t);
+  if (!vo) vo = voices.reduce((a, b) => (a.startAt <= b.startAt ? a : b));   // 空きがなければいちばん古い声
+  wake(vo);
+  const P = TIMBRE[timbreOf(h)], f = midiToFreq(midi);
+  const vel = 0.35 + 0.65 * smooth(0.2, 0.85, s), peak = 0.17 * vel * (0.75 + 0.25 * v);
+  const e = vo.env.gain, t0 = Math.max(t - 0.012, ac.currentTime);
+  holdAt(e, t0); e.linearRampToValueAtTime(0, t);   // 前の音が残っていたら直前で消す
+  vo.oa.frequency.setValueAtTime(f, t);
+  vo.ob.frequency.setValueAtTime(f * P.ratio, t);
+  vo.aG.gain.setValueAtTime(P.a, t);
+  holdAt(vo.bG.gain, t0);
+  vo.bG.gain.setValueAtTime(P.b * (0.6 + 0.4 * vel), t);
+  vo.bG.gain.setTargetAtTime(0, t + 0.005, P.bTau);
+  if (vo.pan) vo.pan.pan.setValueAtTime(clamp(pan, -1, 1), t);
+  // 打って、減衰して、同じ色が続くあいだは少し残り、離れたら消える
+  e.linearRampToValueAtTime(peak, t + P.atk);
+  e.setTargetAtTime(peak * P.sus, t + P.atk, P.tau);
+  const tEnd = t + Math.max(dur, P.atk + 0.05);
+  e.setTargetAtTime(0, tEnd, P.rel / 3);
+  // 明るいマスほど音色も明るく、すぐ落ち着く
+  const lpf = vo.lp.frequency;
+  holdAt(lpf, t0);
+  lpf.setValueAtTime(Math.min(9000, f * (P.bright + 4 * v)), t);
+  lpf.setTargetAtTime(Math.min(5000, f * P.bright * 0.7), t + 0.01, 0.35);
+  vo.startAt = t; vo.freeAt = tEnd + P.rel * 2;
+}
+function playTick(t, v, pan) {
+  const k = ticks[tickIdx++ % ticks.length];
+  holdAt(k.g.gain, Math.max(t - 0.004, ac.currentTime));
+  k.bp.frequency.setValueAtTime(3000 + 6000 * v, t);
+  if (k.pan) k.pan.pan.setValueAtTime(clamp(pan, -1, 1), t);
+  k.g.gain.linearRampToValueAtTime(0.35 * v, t + 0.002);
+  k.g.gain.setTargetAtTime(0, t + 0.003, 0.018);
+}
+
+/* ---------- スキャン ---------- */
+let res = RES[1], dir = "x", looping = false;
+const scan = { on: false, t0: 0, dur: 6, step: 0, steps: 16, lanes: 12, cells: null, plan: null, key: null,
+               glow: null, stopAt: 0 };
+const passDur = () => lerp(12, 2.5, Math.pow(+speedEl.value, 0.9));
+
+function crop() {
+  const W = innerWidth, H = innerHeight, vw = video.videoWidth, vh = video.videoHeight;
+  const sc = Math.max(W / vw, H / vh), sw = W / sc, sh = H / sc;
+  return { sx: (vw - sw) / 2, sy: (vh - sh) / 2, sw, sh };
+}
+// 今の画面を1枚止めて、マスごとの色を読む。cells[step][lane]（lane 0 がいちばん低い音）
+function capture() {
+  const steps = res.steps, lanes = res.lanes;
+  const cols = dir === "x" ? steps : lanes, rows = dir === "x" ? lanes : steps;
+  const { sx, sy, sw, sh } = crop();
+  snap.width = view.width; snap.height = view.height;
+  sctx.drawImage(video, sx, sy, sw, sh, 0, 0, snap.width, snap.height);
+  ana.width = cols * CELL_PX; ana.height = rows * CELL_PX;
+  actx2d.drawImage(video, sx, sy, sw, sh, 0, 0, ana.width, ana.height);
+  const px = actx2d.getImageData(0, 0, ana.width, ana.height).data, n = cols * rows;
+  const R = new Float32Array(n), Gc = new Float32Array(n), B = new Float32Array(n);
+  let wr = 0, wg = 0, wbb = 0, wc = 0;
+  for (let y = 0, p = 0; y < ana.height; y++) {
+    const rb = Math.floor(y / CELL_PX) * cols;
+    for (let x = 0; x < ana.width; x++, p += 4) {
+      const r = px[p], g = px[p + 1], b = px[p + 2], i = rb + Math.floor(x / CELL_PX);
+      R[i] += r; Gc[i] += g; B[i] += b;
+      const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+      if (mx > 50 && mx < 250 && (mx - mn) / mx < 0.15) { wr += r; wg += g; wbb += b; wc++; }
+    }
+  }
+  // ホワイトバランス：白っぽい部分の平均が灰色になるように軽く補正
+  const wbc = { r: 1, g: 1, b: 1 };
+  if (wc > ana.width * ana.height * 0.05) {
+    const avg = (wr + wg + wbb) / 3, gain = s => clamp(Math.pow(avg / s, 0.6), 0.75, 1.35);
+    wbc.r = gain(wr); wbc.g = gain(wg); wbc.b = gain(wbb);
+  }
+  const px2 = CELL_PX * CELL_PX;
+  const cells = Array.from({ length: steps }, () => new Array(lanes));
+  const hist = new Float32Array(12), histV = new Float32Array(12), histX = new Float32Array(12), histY = new Float32Array(12);
+  let vsum = 0, gray = 0;
+  for (let i = 0; i < n; i++) {
+    const col = i % cols, row = Math.floor(i / cols);
+    const [h, s0, v] = rgb2hsv(Math.min(255, R[i] / px2 * wbc.r), Math.min(255, Gc[i] / px2 * wbc.g), Math.min(255, B[i] / px2 * wbc.b));
+    const s = v > 0.1 ? s0 : 0;
+    // 横へ：上ほど高い音。下へ：右ほど高い音（鍵盤と同じ向き）
+    const step = dir === "x" ? col : row, lane = dir === "x" ? rows - 1 - row : col;
+    cells[step][lane] = { h, s, v };
+    vsum += v; if (s < 0.15) gray++;
+    if (s > 0.15 && v > 0.15) {
+      const k = Math.floor(h / 30) % 12, w = s * s, a = h * Math.PI / 180;
+      hist[k] += w; histV[k] += v * w; histX[k] += Math.cos(a) * w; histY[k] += Math.sin(a) * w;
+    }
+  }
+  // 調：いちばん多い色の感情から（画面の大半が白・黒・グレーなら明るさで）
+  let best = 0, total = 0;
+  for (let k = 0; k < 12; k++) { total += hist[k]; if (hist[k] > hist[best]) best = k; }
+  const chroma = total > n * 0.03 && gray / n < 0.8;
+  let dom;
+  if (chroma) {
+    let hue = Math.atan2(histY[best], histX[best]) * 180 / Math.PI; if (hue < 0) hue += 360;
+    dom = classify(hue / 360, true, histV[best] / hist[best]);
+  } else dom = classify(0, false, vsum / n);
+  const rootPc = ((freqToMidi(dom.baseFreq) % 12) + 12) % 12;
+  return { cells, key: { ...dom, rootPc }, steps, lanes };
+}
+// 段ごとの音の高さ：調の音階を下から順に積む（段が多いほど音域が広がる）
+function laneMidi(key, lanes) {
+  const st = SCALES[key.scale].steps, base = 45 + ((key.rootPc - 9 + 12) % 12);   // A2〜G#3 の主音から
+  const out = [];
+  for (let j = 0; j < lanes; j++) out.push(base + st[j % st.length] + 12 * Math.floor(j / st.length) + (lanes <= 8 ? 12 : 0));
+  return out;
+}
+// 鳴らす予定を作る：同じ段で同じような色が続くあいだは1つの長い音にまとめる
+function makePlan(cap) {
+  const { cells, steps, lanes, key } = cap, dens = +densEl.value;
+  const sMin = lerp(0.45, 0.14, dens), vMin = lerp(0.3, 0.12, dens);
+  const pitches = laneMidi(key, lanes);
+  const plan = Array.from({ length: steps }, () => []);
+  for (let j = 0; j < lanes; j++) {
+    let run = null;
+    for (let i = 0; i <= steps; i++) {
+      const c = i < steps ? cells[i][j] : null;
+      const tone = c && c.s >= sMin && c.v >= vMin;
+      const white = c && !tone && c.s < 0.2 && c.v > lerp(0.92, 0.72, dens);
+      // マリンバ風（暖色）は伸ばせないので、同じ色が続いても2刻みごとに打ち直す
+      const cont = run && tone && run.kind === "tone" && hueDist(c.h, run.h) < 28 && Math.abs(c.v - run.v) < 0.25 &&
+                   !(timbreOf(run.h) === 0 && run.len >= 2);
+      if (cont) { run.len++; continue; }
+      if (run) { plan[run.i].push(run); run = null; }
+      if (tone) run = { kind: "tone", i, j, len: 1, h: c.h, s: c.s, v: c.v, m: pitches[j] };
+      else if (white) plan[i].push({ kind: "tick", i, j, len: 1, v: c.v, s: 0 });
+    }
+  }
+  // 1刻みに鳴る音が多すぎるときは、色の強いものから
+  for (const p of plan) { p.sort((a, b) => b.s * (b.v || 0) - a.s * (a.v || 0)); p.length = Math.min(p.length, MAX_ONSETS + 1); }
+  return plan;
+}
+
+function startPass(t) {
+  const cap = capture();
+  scan.cells = cap.cells; scan.steps = cap.steps; scan.lanes = cap.lanes; scan.key = cap.key;
+  scan.plan = makePlan(cap);
+  scan.glow = Array.from({ length: cap.steps }, () => new Float32Array(cap.lanes));
+  scan.dur = passDur(); scan.t0 = t; scan.step = 0;
+  const stepLen = scan.dur / scan.steps;
+  echo.delayTime.setTargetAtTime(Math.min(1.5, stepLen * 1.5), ac.currentTime, 0.05);
+  // 土台の主音：スキャンの頭でふわっと入る
+  let bm = 33 + ((scan.key.rootPc - 9 + 12) % 12); if (bm < 36) bm += 12;
+  bass.b1.frequency.setTargetAtTime(midiToFreq(bm), t, 0.05);
+  bass.b2.frequency.setTargetAtTime(midiToFreq(bm), t, 0.05);
+  holdAt(bass.g.gain, ac.currentTime);
+  bass.g.gain.setTargetAtTime(scan.key.emotion === "Depth" ? 0.12 : 0.07, t, 0.3);
+  keyEl.textContent = `${scan.key.emotion} · ${NOTE_NAMES[scan.key.rootPc]} ${SCALES[scan.key.scale].ja}`;
+}
+function startScan() {
+  if (!started) return;
+  if (ac.state !== "running") ac.resume();
+  scan.on = true;
+  startPass(ac.currentTime + 0.08);
+  scanBtn.textContent = "停止"; scanBtn.classList.add("on");
+}
+function stopScan() {
+  scan.on = false;
+  const t = ac.currentTime;
+  holdAt(bass.g.gain, t); bass.g.gain.setTargetAtTime(0, t, 0.6);
+  scan.stopAt = performance.now();
+  scanBtn.textContent = "スキャン"; scanBtn.classList.remove("on");
+}
+// 少し先までの刻みを、音の時計で予約していく（画面の動きに左右されず、リズムが揺れない）
+function scheduler() {
+  if (!scan.on) return;
+  const now = ac.currentTime, stepLen = scan.dur / scan.steps;
+  for (const vo of voices) if (vo.awake && now > vo.freeAt) sleep(vo);
+  while (scan.on) {
+    const t = scan.t0 + scan.step * stepLen;
+    if (t > now + 0.12) break;
+    if (scan.step >= scan.steps) {
+      if (looping) { startPass(t); continue; }   // ループ：今の画面をもう一度読んで、そのまま次のスキャンへ
+      stopScan(); break;
+    }
+    const i = scan.step, prog = (i + 0.5) / scan.steps;
+    let n = 0;
+    for (const ev of scan.plan[i]) {
+      // 横へ：バーの位置で左右に動く。下へ：段（左右の位置）でそのまま
+      const pan = dir === "x" ? (prog * 2 - 1) * 0.7 : (ev.j / Math.max(1, scan.lanes - 1) * 2 - 1) * 0.8;
+      if (ev.kind === "tone") {
+        if (n >= MAX_ONSETS) continue;
+        playNote(ev.m, t, ev.len * stepLen * 0.95, ev.h, ev.s, ev.v, pan); n++;
+      } else playTick(t, ev.v, pan);
+      const delay = Math.max(0, (t - now) * 1000);
+      setTimeout(() => { if (scan.glow && scan.glow[ev.i]) for (let k = 0; k < ev.len && ev.i + k < scan.steps; k++) scan.glow[ev.i + k][ev.j] = 1; }, delay);
+    }
+    scan.step++;
+  }
+}
+
+/* ---------- 描画 ---------- */
+function resize() {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  view.width = innerWidth * dpr; view.height = innerHeight * dpr;
+}
+addEventListener("resize", resize);
+let lastFrame = 0;
+function render(ts) {
+  requestAnimationFrame(render);
+  if (!video.videoWidth) return;
+  const dt = Math.min(0.1, (ts - lastFrame) / 1000 || 0); lastFrame = ts;
+  const W = view.width, H = view.height, dpr = W / innerWidth;
+  const showSnap = scan.cells && (scan.on || performance.now() - scan.stopAt < 900);
+  if (showSnap && snap.width === W) vctx.drawImage(snap, 0, 0);
+  else { const { sx, sy, sw, sh } = crop(); vctx.drawImage(video, sx, sy, sw, sh, 0, 0, W, H); }
+  if (!showSnap) return;
+  const prog = scan.on ? clamp((ac.currentTime - scan.t0) / scan.dur, 0, 1) : 1;
+  const steps = scan.steps, lanes = scan.lanes;
+  const cols = dir === "x" ? steps : lanes, rows = dir === "x" ? lanes : steps;
+  const cw = W / cols, ch = H / rows;
+  // まだ読んでいない側を少し暗く
+  vctx.fillStyle = "rgba(0,0,0,0.35)";
+  if (dir === "x") vctx.fillRect(prog * W, 0, W - prog * W, H); else vctx.fillRect(0, prog * H, W, H - prog * H);
+  // 鳴ったマスが光り、ゆっくり消える
+  vctx.font = `${10 * dpr}px system-ui,sans-serif`; vctx.textBaseline = "top";
+  const pitches = scan.key ? laneMidi(scan.key, lanes) : [];
+  for (let i = 0; i < steps; i++) for (let j = 0; j < lanes; j++) {
+    const g = scan.glow[i][j];
+    if (g < 0.02) continue;
+    const x = dir === "x" ? i * cw : j * cw, y = dir === "x" ? (lanes - 1 - j) * ch : i * ch;
+    vctx.fillStyle = `rgba(255,255,255,${0.28 * g})`; vctx.fillRect(x, y, cw, ch);
+    vctx.strokeStyle = `rgba(255,255,255,${0.8 * g})`; vctx.lineWidth = 1.5 * dpr; vctx.strokeRect(x + 1, y + 1, cw - 2, ch - 2);
+    if (g > 0.5 && cw > 22 * dpr) { vctx.fillStyle = `rgba(255,255,255,${g})`; vctx.fillText(NOTE_NAMES[pitches[j] % 12], x + 4 * dpr, y + 3 * dpr); }
+    scan.glow[i][j] = g * Math.exp(-dt / 1.2);
+  }
+  // スキャンバー
+  if (scan.on) {
+    const grad = dir === "x" ? vctx.createLinearGradient(prog * W - 40 * dpr, 0, prog * W, 0)
+                             : vctx.createLinearGradient(0, prog * H - 40 * dpr, 0, prog * H);
+    grad.addColorStop(0, "rgba(255,255,255,0)"); grad.addColorStop(1, "rgba(255,255,255,0.35)");
+    vctx.fillStyle = grad;
+    if (dir === "x") vctx.fillRect(prog * W - 40 * dpr, 0, 40 * dpr, H); else vctx.fillRect(0, prog * H - 40 * dpr, W, 40 * dpr);
+    vctx.fillStyle = "#fff";
+    if (dir === "x") vctx.fillRect(prog * W - 1.5 * dpr, 0, 3 * dpr, H); else vctx.fillRect(0, prog * H - 1.5 * dpr, W, 3 * dpr);
+  }
+}
+
+/* ---------- 焦点（タップした場所に合わせる） ---------- */
+let focusTimer = 0, focusNoticeShown = false;
+async function focusAt(cx, cy) {
+  if (!camTrack || !video.videoWidth) return;
+  const W = innerWidth, Hh = innerHeight, vw = video.videoWidth, vh = video.videoHeight;
+  const sc = Math.max(W / vw, Hh / vh), dx = (W - vw * sc) / 2, dy = (Hh - vh * sc) / 2;
+  const x = clamp((cx - dx) / (vw * sc), 0, 1), y = clamp((cy - dy) / (vh * sc), 0, 1);
+  ring.style.left = cx + "px"; ring.style.top = cy + "px";
+  ring.className = "show";
+  clearTimeout(focusTimer);
+  const caps = camTrack.getCapabilities ? camTrack.getCapabilities() : {};
+  const c = {};
+  if (caps.focusMode) {
+    if (caps.focusMode.includes("single-shot")) c.focusMode = "single-shot";
+    else if (caps.focusMode.includes("continuous")) c.focusMode = "continuous";
+  }
+  if (caps.exposureMode && caps.exposureMode.includes("continuous")) c.exposureMode = "continuous";
+  if ("pointsOfInterest" in caps || caps.focusMode) c.pointsOfInterest = [{ x, y }];
+  let ok = false;
+  if (Object.keys(c).length) { try { await camTrack.applyConstraints({ advanced: [c] }); ok = true; } catch (_) {} }
+  if (!ok) {
+    ring.className = "show fail";
+    if (!focusNoticeShown) { focusNoticeShown = true; keyEl.dataset.note = "この端末のブラウザは焦点の指定に対応していません"; }
+  }
+  focusTimer = setTimeout(() => { ring.className = ""; delete keyEl.dataset.note; }, 900);
+}
+view.addEventListener("pointerup", e => { if (started) focusAt(e.clientX, e.clientY); });
+
+/* ---------- 操作 ---------- */
+const densText = x => x < 0.25 ? "まばら" : x < 0.6 ? "ふつう" : x < 0.85 ? "多め" : "ぎっしり";
+const updSpeed = () => { $("speedL").textContent = passDur().toFixed(1) + "秒"; };
+speedEl.addEventListener("input", updSpeed);
+densEl.addEventListener("input", () => { $("densL").textContent = densText(+densEl.value); });
+revEl.addEventListener("input", () => {
+  $("revL").textContent = Math.round(revEl.value * 100) + "%";
+  if (ac) revGain.gain.setTargetAtTime(+revEl.value, ac.currentTime, 0.1);
+});
+$("dirSeg").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  for (const x of $("dirSeg").children) x.classList.toggle("on", x === b);
+  dir = b.dataset.d;
+  if (scan.on) stopScan();
+});
+$("resSeg").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  for (const x of $("resSeg").children) x.classList.toggle("on", x === b);
+  res = RES[+b.dataset.r];
+  $("resL").textContent = res.lanes + "×" + res.steps;
+});
+scanBtn.addEventListener("click", () => (scan.on ? stopScan() : startScan()));
+loopBtn.addEventListener("click", () => {
+  looping = !looping;
+  loopBtn.classList.toggle("on", looping);
+  loopBtn.querySelector("small").textContent = looping ? "オン" : "オフ";
+});
+addEventListener("keydown", e => {
+  if (e.code === "Space" && started) { e.preventDefault(); scan.on ? stopScan() : startScan(); }
+});
+updSpeed();
+resize();
+
+$("start").addEventListener("click", async () => {
+  if (started) return;
+  try {
+    initAudio();
+    revGain.gain.value = +revEl.value;
+    await ac.resume();
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false
+    });
+    video.srcObject = stream;
+    camTrack = stream.getVideoTracks()[0];
+    const caps = camTrack.getCapabilities ? camTrack.getCapabilities() : {};
+    if (caps.focusMode && caps.focusMode.includes("continuous")) {
+      camTrack.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => {});
+    }
+    await video.play();
+    started = true;
+    $("start").style.display = "none";
+    setInterval(scheduler, 25);
+    requestAnimationFrame(render);
+  } catch (err) {
+    $("msg").textContent = "カメラを開始できませんでした：" + (err && err.message || err) +
+      "（スマホでは https で開く必要があります）";
+  }
+});
+})();
+</script>
+</body>
+</html>
