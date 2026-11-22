@@ -44,7 +44,18 @@
   .seg button { flex:1; height:32px; border:0; background:transparent; color:#fff; font-size:13px; cursor:pointer;
     touch-action:manipulation; }
   .seg button.on { background:#fff; color:#000; font-weight:600; }
+  .row.wide .seg { grid-column:2 / 4; }
+  .row.wide .seg button { font-size:12px; white-space:nowrap; padding:0 4px; }
   #power.off { background:#222 !important; opacity:.75; }
+  .btns { display:flex; align-items:center; justify-content:center; gap:22px; }
+  .btns .pad { width:60px; }
+  #lock { width:60px; height:60px; border-radius:50%; border:2px solid rgba(255,255,255,.75); background:rgba(0,0,0,.4);
+    color:#fff; font-size:13px; font-weight:600; line-height:1.15; cursor:pointer; touch-action:manipulation;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; transition:transform .08s; visibility:hidden; }
+  #lock.show { visibility:visible; }
+  #lock small { font-size:10px; font-weight:400; opacity:.85; }
+  #lock:active { transform:scale(.94); }
+  #lock.on { border:3px solid #fff; box-shadow:0 0 14px rgba(255,255,255,.7); font-size:18px; }
 
   #start { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
     gap:14px; background:#000; z-index:10; text-align:center; padding:24px; cursor:pointer; }
@@ -66,8 +77,8 @@
   <div class="row"><span>なめらか</span><input id="speed" type="range" min="0" max="1" step="0.001" value="0.3"><span>急激</span></div>
   <div class="row"><span>声部の数</span><input id="voices" type="range" min="1" max="5" step="1" value="3"><span id="vnum">3音</span></div>
   <div class="row"><span>ビット粗さ</span><input id="crush" type="range" min="0" max="1" step="0.01" value="0"><span id="cnum">0%</span></div>
-  <div class="row"><span>音の選び方</span><div class="seg"><button id="modeHue" class="on">色相→音階</button><button id="modeChord">コード</button></div><span></span></div>
-  <button id="power">ON</button>
+  <div class="row wide"><span>音の選び方</span><div class="seg"><button id="modeHue" class="on">色相→音階</button><button id="modeChord">コード</button><button id="modeAmb">アンビエント</button></div></div>
+  <div class="btns"><button id="lock">主音<small>ロック</small></button><button id="power">ON</button><span class="pad"></span></div>
 </div>
 
 <div id="start">
@@ -96,7 +107,8 @@ let chordMode = false;   // false=色相→音階（従来）, true=コードの
 let susOn = false;       // くすんだ画面で3度を抜いている状態（ヒステリシス付き）
 let chordLabel = "";
 
-let ac, master, gate, dryGain, wetGain, voices = [];
+let ambientMode = false; // true=アンビエント（マス目の色が、まばらに呼吸するように鳴る）
+let ac, master, gate, dryGain, wetGain, classicG, voices = [];
 let toneLP, revGain, sub, shimmer, lfo, lfoDepth;   // 白黒・くすみが和音の鳴り方を変えるための部品
 let running = false, started = false;
 let voiceCount = +voicesEl.value;
@@ -224,7 +236,10 @@ function initAudio() {
   const conv = ac.createConvolver(); conv.buffer = makeImpulse(3.0);
   revGain = ac.createGain(); revGain.gain.value = 0.15;
   toneLP.connect(conv).connect(revGain).connect(gate);
-  gate.connect(master).connect(comp).connect(makeup).connect(ac.destination);
+  // 従来の音（classicG）とアンビエントの音は、どちらも master（オン／オフ）を通る
+  classicG = ac.createGain(); classicG.gain.value = ambientMode ? 0 : 1;
+  gate.connect(classicG).connect(master);
+  master.connect(comp).connect(makeup).connect(ac.destination);
 
   // 低い土台（主音の1オクターブ下）：黒が多いほど鳴る
   sub = mkSine(); sub.g.connect(bus);
@@ -279,6 +294,7 @@ function initAudio() {
     voices.push({ a, b, ga, gb, f, g, jitter: 0,
       q: { trem, clean, drive, vib, vibD, tr, trD, fl, flD, c1, c2, chG, mod, fmD, p2, pG } });
   }
+  initAmbient();
 }
 function mkSine() {
   const o = ac.createOscillator(); o.type = "sine"; o.frequency.value = 110;
@@ -344,10 +360,15 @@ function analyze() {
   }
 
   let diff = 0, changed = 0, dark = 0, bright = 0, lsum = 0, lsq = 0;
+  if (ambientMode) { ambR.fill(0); ambG.fill(0); ambB.fill(0); ambCnt.fill(0); }
   for (let i = 0, p = 0; i < n; i++, p += 4) {
     const r0 = px[p], g0 = px[p + 1], b0 = px[p + 2];
     const L = 0.299 * r0 + 0.587 * g0 + 0.114 * b0;
     const r = Math.min(255, r0 * wb.r), g = Math.min(255, g0 * wb.g), b = Math.min(255, b0 * wb.b);
+    if (ambientMode) {   // アンビエント用：マス目ごとの平均色
+      const x = i % AW, y = (i / AW) | 0, ci = ((y * AGY / AH) | 0) * AGX + ((x * AGX / AW) | 0);
+      ambR[ci] += r; ambG[ci] += g; ambB[ci] += b; ambCnt[ci]++;
+    }
     lum[i] = L;
     if (prevLum) { const d = Math.abs(L - prevLum[i]); diff += d; if (d > 28) changed++; }
     const [hh, ss, vv] = rgb2hsv(r, g, b);
@@ -449,6 +470,11 @@ function analyze() {
     if (now - keyCandSince >= hold) { key = { ...keyCand, hueRef: ordered[0].hue }; keyCand = null; }
   } else keyCand = null;
   if (rootSwitched) { key.hueRef = ordered[0].hue; rootSwitched = false; }
+  if (ambientMode) {
+    const K = ambLocked ? ambLocked.key : key;
+    keyEl.textContent = (ambLocked ? '［固定］' : '') + `${K.emotion} · ${NOTE_NAMES[K.rootMidi % 12]} ${SCALES[K.scale].ja}` +
+      (ambLabel ? ` ｜ ${ambLabel}` : '');
+  } else
   keyEl.textContent = `${key.emotion} · ${NOTE_NAMES[key.rootMidi % 12]} ${SCALES[key.scale].ja}` +
     (chordMode && chordLabel ? ` ｜ ${chordLabel}` : '');
 
@@ -457,13 +483,14 @@ function analyze() {
   // カメラ自体を動かして画面全体が変わったとき（changedFrac が大きい）はグリッチを抑える。
   const panSuppress = clamp((0.8 - changedFrac) / 0.35, 0, 1);
   const g = clamp((diff - 16) / 30, 0, 1) * panSuppress;
-  if (g > 0.12 && running) {
+  if (g > 0.12 && running && !ambientMode) {   // アンビエントでは途切れや映像の乱れは起こさない
     glitch = Math.max(glitch, g);
     glitchVis = Math.max(glitchVis, g);
     if (now - lastGlitchAt > 450) { triggerGlitch(g); lastGlitchAt = now; }
   }
 
   updateAudio(ordered, abrupt);
+  ambientTick(diff * panSuppress, abrupt);
   drawBars();
 }
 
@@ -615,6 +642,213 @@ function updateAudio(ordered, abrupt) {
   if (root) powerBtn.style.background = `hsl(${root.hue},${Math.round(root.sat * 80)}%,${Math.round(25 + root.val * 25)}%)`;
 }
 
+/* ---------- アンビエント ----------
+   Color Sound Gaze と同じく画面をマス目に分けるが、音は「その瞬間の印象」を拾って長く漂わせる。
+   ・層（スロット）ごとに長さの違う周期で、そのとき色の強いマスを1つ選び、ゆっくり満ちて引く音を鳴らす
+     （長さのずれたテープループを重ねるイーノの発想。同じ組み合わせがなかなか繰り返されない）
+   ・音色はサイン波／三角波が中心。鮮やかなマスほどやわらかいノコギリ波が混ざり、フィルターが息をするように開閉する
+   ・テープの揺れ（ワウ・フラッター）、軽い飽和、テープエコー、長い残響、1オクターブ上のきらめきは残響の中だけ
+   ・映像が動くと、細かいデジタルの粒（グレイン）が残響の中に散る。ヒスとプチプチがうっすら下に敷かれる */
+const AGX = 6, AGY = 4, ACELLS = AGX * AGY;
+const ambR = new Float32Array(ACELLS), ambG = new Float32Array(ACELLS), ambB = new Float32Array(ACELLS), ambCnt = new Float32Array(ACELLS);
+const ambCells = Array.from({ length: ACELLS }, () => ({ h: 0, s: 0, v: 0 }));
+const LOOP_RATIOS = [1, 1.31, 1.62, 1.93, 2.37, 2.71, 3.13, 3.53];   // 層ごとの周期の比（割り切れない比にしてずらす）
+const SLOTS_BY_VOICES = [0, 2, 3, 5, 6, 8];                          // 「声部の数」スライダー → 層の数
+let amb = null, ambLocked = null, ambLabel = "", lastAmbT = null, lastGrainAt = 0;
+const ambActive = new Set();
+
+function softCurve(k) {
+  const n = 2048, c = new Float32Array(n);
+  for (let i = 0; i < n; i++) { const x = i / (n - 1) * 2 - 1; c[i] = Math.tanh(k * x) / Math.tanh(k); }
+  return c;
+}
+function initAmbient() {
+  const G = v => { const g = ac.createGain(); g.gain.value = v; return g; };
+  const BQ = (type, f, q) => { const b = ac.createBiquadFilter(); b.type = type; b.frequency.value = f; b.Q.value = q; return b; };
+  const out = G(ambientMode ? 1 : 0); out.connect(master);
+  const bus = G(1);
+  const sat = ac.createWaveShaper(); sat.curve = softCurve(1.6); sat.oversample = "2x";   // テープのような軽い飽和
+  const warm = BQ("lowpass", 4000, 0.5), hp = BQ("highpass", 55, 0.7);
+  bus.connect(G(0.9)).connect(sat).connect(warm).connect(hp);
+  hp.connect(G(0.5)).connect(out);
+  // 長い残響
+  const conv = ac.createConvolver(); conv.buffer = makeImpulse(9);
+  hp.connect(conv); conv.connect(G(0.9)).connect(out);
+  // テープエコー（繰り返すたびにこもっていく）
+  const dl = ac.createDelay(2); dl.delayTime.value = 0.68;
+  const fb = G(0.42), elp = BQ("lowpass", 2200, 0.5);
+  hp.connect(G(0.35)).connect(dl); dl.connect(elp).connect(fb).connect(dl);
+  elp.connect(G(0.5)).connect(out); elp.connect(conv);
+  // 1オクターブ上のきらめき：残響の中だけで鳴らす
+  const shimmer = G(1); shimmer.connect(conv);
+  // テープの揺れ
+  const wow = ac.createOscillator(); wow.frequency.value = 0.21;
+  const flut = ac.createOscillator(); flut.frequency.value = 5.7;
+  const wowD = G(7), flutD = G(2);
+  wow.connect(wowD); flut.connect(flutD); wow.start(); flut.start();
+  wow.connect(G(0.0015)).connect(dl.delayTime);
+  // ヒスとプチプチ
+  const sr = ac.sampleRate;
+  const noise = ac.createBuffer(1, sr * 3, sr), nd = noise.getChannelData(0);
+  for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+  const hissSrc = ac.createBufferSource(); hissSrc.buffer = noise; hissSrc.loop = true;
+  const hissG = G(0); hissSrc.connect(BQ("highpass", 4000, 0.5)).connect(hissG).connect(out); hissSrc.start();
+  const crk = ac.createBuffer(1, sr * 4, sr), cd = crk.getChannelData(0);
+  for (let k = 0; k < 4 * 18; k++) {
+    const at = Math.floor(Math.random() * (cd.length - 40)), a = Math.pow(Math.random(), 3) * (Math.random() < 0.5 ? -1 : 1);
+    for (let j = 0; j < 30; j++) cd[at + j] += a * Math.exp(-j / 4) * (j % 2 ? -0.6 : 1);
+  }
+  const crkSrc = ac.createBufferSource(); crkSrc.buffer = crk; crkSrc.loop = true;
+  const crkG = G(0), crkF = BQ("bandpass", 2500, 0.5);
+  crkSrc.connect(crkF).connect(crkG); crkG.connect(out); crkG.connect(G(0.3)).connect(conv); crkSrc.start();
+  // 主音と5度の持続音（ふだんはうっすら、主音ロック中ははっきり）
+  const d1 = ac.createOscillator(), d2 = ac.createOscillator(), dG = G(0), d2G = G(0.35);
+  d1.type = "sine"; d2.type = "triangle"; d1.frequency.value = 65; d2.frequency.value = 98;
+  d1.connect(dG); d2.connect(d2G).connect(dG); dG.connect(bus);
+  wowD.connect(d1.detune); wowD.connect(d2.detune); d1.start(); d2.start();
+  amb = { out, bus, conv, shimmer, wowD, flutD, hissG, crkG, dG, d1, d2, warm, noise,
+          slots: LOOP_RATIOS.map(() => ({ next: 0 })) };
+}
+
+function ambientTick(motion, abrupt) {
+  if (!amb) return;
+  const t = ac.currentTime;
+  // 従来の音とアンビエントをゆっくり入れ替える
+  classicG.gain.setTargetAtTime(ambientMode ? 0 : 1, t, 0.6);
+  amb.out.gain.setTargetAtTime(ambientMode ? 1 : 0, t, 0.6);
+  if (!ambientMode) return;
+
+  for (let i = 0; i < ACELLS; i++) {
+    const k = ambCnt[i] || 1;
+    const [h, s, v] = rgb2hsv(ambR[i] / k, ambG[i] / k, ambB[i] / k);
+    const c = ambCells[i]; c.h = h; c.s = v > 0.08 ? s : 0; c.v = v;
+  }
+  const K = ambLocked ? ambLocked.key : key;
+  const T = ambLocked ? ambLocked.T : chordTones(SCALES[K.scale].steps, susOn, scene.mean > 0.5);
+  if (!ambLocked) lastAmbT = T;
+  ambLabel = chordName(K.rootMidi, T, 5);
+
+  // 層ごとに、自分の周期が来たら1音
+  const nSlots = SLOTS_BY_VOICES[voiceCount], base = lerp(11, 4, abrupt);
+  for (let k = 0; k < nSlots; k++) {
+    const s = amb.slots[k], P = base * LOOP_RATIOS[k];
+    if (s.next === 0 || s.next - t > P * 1.5) { s.next = t + Math.random() * P * 0.6; continue; }   // 最初はばらけて入る
+    if (t >= s.next) { ambNote(pickCell(), P * 0.75, T, K, abrupt, nSlots); s.next = t + P * (0.9 + Math.random() * 0.2); }
+  }
+
+  // 暗い画面ほどこもり、明るい画面ほどひらける
+  amb.warm.frequency.setTargetAtTime(1600 * Math.pow(4.5, clamp(scene.mean * 1.2, 0, 1)), t, 1.5);
+  // 持続音
+  const root = K.rootMidi - 24;
+  amb.d1.frequency.setTargetAtTime(midiToFreq(root), t, 2);
+  amb.d2.frequency.setTargetAtTime(midiToFreq(root + T['5']), t, 2);
+  amb.dG.gain.setTargetAtTime(ambLocked ? 0.13 : 0.04 + 0.03 * smooth(0.15, 0.6, scene.dark), t, ambLocked ? 0.8 : 1.5);
+  // ざらつき：「ビット粗さ」スライダーで量を決める
+  const grit = +crushEl.value;
+  amb.hissG.gain.setTargetAtTime(0.004 + grit * 0.014, t, 0.5);
+  amb.crkG.gain.setTargetAtTime(0.03 + grit * 0.18, t, 0.5);
+  // 映像が動いた分だけ、デジタルの粒を散らす
+  const p = clamp((motion - 3) / 18, 0, 1) * 0.6 + grit * 0.12;
+  const now = performance.now();
+  if (Math.random() < p && now - lastGrainAt > 60) { lastGrainAt = now; ambGrain(T, K); }
+}
+// 色の強いマスほど選ばれやすい（くすんだマスも、たまに選ばれる）
+function pickCell() {
+  let sum = 0;
+  const w = ambCells.map(c => { const x = 0.12 + c.s * (0.3 + c.v) * 2; sum += x; return x; });
+  let r = Math.random() * sum;
+  for (let i = 0; i < ACELLS; i++) { r -= w[i]; if (r <= 0) return i; }
+  return ACELLS - 1;
+}
+function nearestTone(m, rootPc, pcs) {
+  let best = 0, bd = 1e9;
+  const base = Math.floor(m / 12) * 12;
+  for (let o = -12; o <= 12; o += 12) for (const pc of pcs) {
+    const cand = base + o + ((rootPc + pc) % 12 + 12) % 12, d = Math.abs(cand - m);
+    if (d < bd) { bd = d; best = cand; }
+  }
+  return best;
+}
+function ambNote(ci, dur, T, K, abrupt, nSlots) {
+  const c = ambCells[ci], t = ac.currentTime + 0.03;
+  // 明るさ＝音域、色相＝その中の位置 → いちばん近い構成音（低い音は1・5だけで濁らせない）
+  const free = 50 + Math.pow(c.v, 0.9) * 26 + (c.h / 360) * 12 * smooth(0.05, 0.2, c.s);
+  const pcs = free < 55 ? [0, T['5']] : [0, T['3'], T['5'], T['7'], T['9']];
+  let m = nearestTone(free, K.rootMidi % 12, pcs);
+  while (ambActive.has(m) && m < 90) m += 12;
+  ambActive.add(m);
+  const f = midiToFreq(m), s = c.s, v = c.v;
+  const atk = lerp(3.5, 0.8, abrupt), rel = lerp(6, 2.5, abrupt), hold = Math.max(0.4, dur - atk);
+  const tRel = t + atk + hold, tEnd = tRel + rel * 1.6;
+
+  const env = ac.createGain(); env.gain.value = 0;
+  const lp = ac.createBiquadFilter(); lp.type = "lowpass"; lp.Q.value = 0.4;
+  let pan = env;
+  if (ac.createStereoPanner) { pan = ac.createStereoPanner(); pan.pan.value = ((ci % AGX) / (AGX - 1) * 2 - 1) * 0.7; env.connect(pan); }
+  lp.connect(env); pan.connect(amb.bus);
+  const oscs = [];
+  const add = (type, mult, level, det, dest) => {
+    const o = ac.createOscillator(); o.type = type; o.frequency.value = f * mult; o.detune.value = det;
+    const g = ac.createGain(); g.gain.value = level; o.connect(g).connect(dest);
+    amb.wowD.connect(o.detune); amb.flutD.connect(o.detune);
+    o.start(t); o.stop(tEnd); oscs.push(o); return o;
+  };
+  add("sine", 1, 1 - 0.55 * s, 0, lp);
+  add("triangle", 1, 0.3, 3, lp);
+  const sawL = Math.pow(s, 1.2) * 0.4;   // 鮮やかなマスほど、やわらかいノコギリ波が混ざる
+  if (sawL > 0.02) { add("sawtooth", 1, sawL, -8, lp); add("sawtooth", 1, sawL, 8, lp); }
+  // 1オクターブ上のきらめき（明るいマスほど）。残響の中だけで鳴る
+  const shG = ac.createGain(); shG.gain.value = 0; shG.connect(amb.shimmer);
+  add("sine", 2, 1, 0, shG);
+  const shL = 0.05 * smooth(0.4, 0.9, v);
+  shG.gain.setValueAtTime(0, t); shG.gain.setTargetAtTime(shL, t + atk * 0.5, atk / 2); shG.gain.setTargetAtTime(0, tRel, rel / 4);
+  // フィルターが息をするように開いて閉じる
+  lp.frequency.setValueAtTime(f * 1.2, t);
+  lp.frequency.setTargetAtTime(Math.min(12000, f * (2 + 6 * s) * (0.6 + 0.6 * v)), t, atk / 2);
+  lp.frequency.setTargetAtTime(f * 1.1, tRel, rel / 3);
+  const peak = 0.16 * (0.55 + 0.45 * v) / Math.sqrt(Math.max(2, nSlots) / 2);
+  env.gain.setValueAtTime(0, t);
+  env.gain.setTargetAtTime(peak, t, atk / 3);
+  env.gain.setTargetAtTime(0, tRel, rel / 4);
+  oscs[0].onended = () => {
+    ambActive.delete(m);
+    for (const o of oscs) { try { amb.wowD.disconnect(o.detune); amb.flutD.disconnect(o.detune); } catch (_) {} }
+    try { pan.disconnect(); } catch (_) {}
+  };
+}
+// デジタルの粒：ノイズを構成音の高さで細く切り出した、短いきらめき
+function ambGrain(T, K) {
+  const t = ac.currentTime + 0.01, d = 0.02 + Math.random() * 0.07;
+  const tones = [0, T['3'], T['5'], T['7'], T['9']];
+  const f = midiToFreq(K.rootMidi + tones[(Math.random() * 5) | 0] + (Math.random() < 0.5 ? 12 : 24));
+  const src = ac.createBufferSource(); src.buffer = amb.noise;
+  const bp = ac.createBiquadFilter(); bp.type = "bandpass"; bp.frequency.value = f; bp.Q.value = 12;
+  const g = ac.createGain(); g.gain.value = 0;
+  src.connect(bp).connect(g);
+  let o = g;
+  if (ac.createStereoPanner) { o = ac.createStereoPanner(); o.pan.value = Math.random() * 1.6 - 0.8; g.connect(o); }
+  o.connect(amb.conv); o.connect(amb.out);
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(0.9, t + 0.006);
+  g.gain.setTargetAtTime(0, t + 0.012, d / 3);
+  src.start(t, Math.random() * 2.5); src.stop(t + d + 0.4);
+}
+function toggleAmbLock() {
+  if (!started || !key || !ambientMode) return;
+  if (!ambLocked) {
+    const T = lastAmbT || chordTones(SCALES[key.scale].steps, susOn, scene.mean > 0.5);
+    ambLocked = { key: { ...key }, T };
+    lockBtn.classList.add("on");
+    lockBtn.style.background = powerBtn.style.background;
+    lockBtn.innerHTML = `${NOTE_NAMES[key.rootMidi % 12]}<small>固定中</small>`;
+  } else {
+    ambLocked = null;
+    lockBtn.classList.remove("on");
+    lockBtn.style.background = "";
+    lockBtn.innerHTML = "主音<small>ロック</small>";
+  }
+}
+
 /* ---------- 表示 ---------- */
 const barEls = [];
 for (let i = 0; i < 6; i++) { const d = document.createElement("div"); d.className = "bar"; barsEl.appendChild(d); barEls.push(d); }
@@ -704,21 +938,34 @@ view.addEventListener("click", async e => {
 
 /* ---------- 操作 ---------- */
 crushEl.addEventListener("input", () => { cnum.textContent = Math.round(crushEl.value * 100) + "%"; });
-function setMode(chord) {
-  chordMode = chord;
-  modeHueBtn.classList.toggle("on", !chord);
-  modeChordBtn.classList.toggle("on", chord);
+const modeAmbBtn = $("modeAmb"), lockBtn = $("lock");
+function setMode(mode) {   // "hue" | "chord" | "amb"
+  chordMode = mode === "chord";
+  const wasAmb = ambientMode;
+  ambientMode = mode === "amb";
+  modeHueBtn.classList.toggle("on", mode === "hue");
+  modeChordBtn.classList.toggle("on", mode === "chord");
+  modeAmbBtn.classList.toggle("on", ambientMode);
+  lockBtn.classList.toggle("show", ambientMode);
+  if (ambientMode && !wasAmb && amb) for (const s of amb.slots) s.next = 0;   // 入り直したら層をばらけさせて始める
+  if (!ambientMode && ambLocked) toggleAmbLockOff();
+  updateVnum();
 }
-modeHueBtn.addEventListener("click", () => setMode(false));
-modeChordBtn.addEventListener("click", () => setMode(true));
+function toggleAmbLockOff() { ambLocked = null; lockBtn.classList.remove("on"); lockBtn.style.background = ""; lockBtn.innerHTML = "主音<small>ロック</small>"; }
+function updateVnum() { vnum.textContent = ambientMode ? SLOTS_BY_VOICES[voiceCount] + "層" : voiceCount + "音"; }
+modeHueBtn.addEventListener("click", () => setMode("hue"));
+modeChordBtn.addEventListener("click", () => setMode("chord"));
+modeAmbBtn.addEventListener("click", () => setMode("amb"));
+lockBtn.addEventListener("click", toggleAmbLock);
 voicesEl.addEventListener("input", () => {
   voiceCount = +voicesEl.value;
-  vnum.textContent = voiceCount + "音";
+  updateVnum();
   drawBars();
 });
 powerBtn.addEventListener("click", () => setOn(!running));
 addEventListener("keydown", e => {
   if (e.code === "Space" && started) { e.preventDefault(); setOn(!running); }
+  if (e.code === "KeyL" && started && ambientMode) toggleAmbLock();
 });
 
 $("start").addEventListener("click", async () => {
