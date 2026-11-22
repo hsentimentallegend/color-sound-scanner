@@ -168,7 +168,10 @@ function chordName(rootMidi, T) {
 }
 
 /* ---------- オーディオ ---------- */
-let ac, master, busClean, busGrit, preA, preB, revGain, toneLP, noiseG, noiseBP, sub, pedal, bend;
+let ac, master, busClean, busGrit, preA, preB, revGain, toneLP, noiseG, noiseBP, sub, pedal;
+// アームの曲げ量（セント）。音声の速さでつなぐと全オシレーターが毎サンプル計算になり重いので、
+// 動かしたときだけ各 detune に書き込む
+let bendCents = 0, bendTarget = 0, bendTc = 0.015, bendQueued = false;
 let voices = [], running = false, started = false;
 
 function tanhCurve(k) {
@@ -196,9 +199,6 @@ function makeImpulse(sec) {
 function initAudio() {
   ac = new (window.AudioContext || window.webkitAudioContext)();
   const G = v => { const g = ac.createGain(); g.gain.value = v; return g; };
-
-  // 全オシレーターのピッチを一度に動かす「アーム」（ConstantSource を全部の detune につなぐ）
-  if (ac.createConstantSource) { bend = ac.createConstantSource(); bend.offset.value = 0; bend.start(); }
 
   // 2系統のファズ：なめらかに歪む系統（busClean）と、彩度が高いほど送られるざらついた系統（busGrit）
   busClean = G(1); busGrit = G(1);
@@ -254,7 +254,6 @@ function initAudio() {
   // 暗い部分が多いほど鳴る低い土台（ファズを通さず重さだけ足す）
   const so = ac.createOscillator(); so.type = "sine"; so.frequency.value = 55;
   const sg = G(0); so.connect(sg).connect(hp); so.start();
-  if (bend) bend.connect(so.detune);
   sub = { o: so, g: sg };
 
   // 主音ロックの持続音（ペダル）：他の声と同じくファズ→コーラス→残響を通して壁に溶かす
@@ -264,7 +263,6 @@ function initAudio() {
   pa.detune.value = -7; pb.detune.value = 7;
   pa.connect(pg); pb.connect(pg); pc.connect(pcg).connect(pg);
   pg.connect(busClean);
-  if (bend) { bend.connect(pa.detune); bend.connect(pb.detune); bend.connect(pc.detune); }
   pa.start(); pb.start(); pc.start();
   pedal = { a: pa, b: pb, c: pc, g: pg };
 }
@@ -297,7 +295,7 @@ function mkVoice(col, row) {
   a.type = b.type = "sawtooth";
   const f0 = 110 * (1 + Math.random() * 0.5);
   a.frequency.value = b.frequency.value = f0;
-  a.detune.value = -12; b.detune.value = 12;
+  a.detune.value = -12 + bendCents; b.detune.value = 12 + bendCents;
   let out;
   if (ac.createStereoPanner) { out = ac.createStereoPanner(); out.pan.value = GX > 1 ? (col / (GX - 1) * 2 - 1) * 0.85 : 0; }
   else out = ac.createGain();
@@ -305,7 +303,6 @@ function mkVoice(col, row) {
   const gc = ac.createGain(), gg = ac.createGain(); gc.gain.value = 0; gg.gain.value = 0;
   out.connect(gc).connect(busClean);
   out.connect(gg).connect(busGrit);
-  if (bend) { bend.connect(a.detune); bend.connect(b.detune); }
   // 位相をずらして始める（全部が同時にそろうクリックを避ける）
   const t = ac.currentTime + Math.random() * 0.02;
   a.start(t); b.start(t);
@@ -438,8 +435,8 @@ function tick() {
     // ノイズ寄りほど2本のノコギリ波を大きくずらす（うなりが濁る）
     const spread = lerp(30, 8, coh) * (1 + 0.6 * c.s);
     if (Math.abs(spread - v.spread) > 1) {
-      v.a.detune.setTargetAtTime(-spread, t, 0.1);
-      v.b.detune.setTargetAtTime(spread * 0.93, t, 0.1);
+      v.a.detune.setTargetAtTime(-spread + bendCents, t, 0.1);
+      v.b.detune.setTargetAtTime(spread * 0.93 + bendCents, t, 0.1);
       v.spread = spread;
     }
     /* 彩度＝ざらつきと音量。暗いマスも低音の重みとして残す */
@@ -538,11 +535,20 @@ function updateSwell() {
     swell[i] += (w - swell[i]) * (w > swell[i] ? 0.35 : 0.15);
   }
 }
+// 指の動きは1秒に何十回も来るので、画面の書き換えごとに1回だけまとめて書き込む
 function setBend(cents, tc) {
   if (!ac) return;
-  const t = ac.currentTime;
-  if (bend) bend.offset.setTargetAtTime(cents, t, tc);
-  else for (const v of voices) { v.a.detune.setTargetAtTime(-v.spread + cents, t, tc); v.b.detune.setTargetAtTime(v.spread + cents, t, tc); }
+  bendTarget = cents; bendTc = tc;
+  if (!bendQueued) { bendQueued = true; requestAnimationFrame(flushBend); }
+}
+function flushBend() {
+  bendQueued = false;
+  if (Math.abs(bendTarget - bendCents) < 0.5) return;
+  const t = ac.currentTime, c = bendTarget, tc = bendTc;
+  bendCents = c;
+  for (const v of voices) { v.a.detune.setTargetAtTime(-v.spread + c, t, tc); v.b.detune.setTargetAtTime(v.spread * 0.93 + c, t, tc); }
+  if (sub) sub.o.detune.setTargetAtTime(c, t, tc);
+  if (pedal) { pedal.a.detune.setTargetAtTime(-7 + c, t, tc); pedal.b.detune.setTargetAtTime(7 + c, t, tc); pedal.c.detune.setTargetAtTime(c, t, tc); }
 }
 view.addEventListener("pointerdown", e => {
   if (!started) return;
