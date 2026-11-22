@@ -181,7 +181,7 @@ function nearestTone(m, rootPc, pcs) {
    呼吸：長さの違う周期で、色の強いマスから1音ずつ浮かび上がる（満ちて引く、フィルターが息をする）
    空間：テープの揺れ → 軽い飽和 → テープエコー・長い残響（1オクターブ上のきらめきは残響の中だけ）
    質感：映像が動くとデジタルの粒が散る。ヒスとプチプチがうっすら下に敷かれる */
-let ac, master, bus, padBus, padLP, warm, conv, revGain, shimmer, wowD, flutD, bend, hissG, crkG, drone, noiseBuf;
+let ac, master, bus, padBus, padLP, warm, conv, revGain, shimmer, hissG, crkG, drone, noiseBuf;
 let pads = [], running = false, started = false;
 
 function softCurve(k) {
@@ -202,12 +202,11 @@ function initAudio() {
   const G = v => { const g = ac.createGain(); g.gain.value = v; return g; };
   const BQ = (type, f, q) => { const b = ac.createBiquadFilter(); b.type = type; b.frequency.value = f; b.Q.value = q; return b; };
 
-  // テープの揺れと、手でテープを遅くするような音程の沈み（全オシレーターの detune に共通でつなぐ）
+  // テープの揺れ：本物のテープと同じく、全体の音を通す短いディレイの長さを揺らして音程をよれさせる。
+  // （以前は全オシレーターの音程に直接つないでいたが、それだと1本ずつ毎サンプル計算が必要で重く、音が途切れた）
   const wow = ac.createOscillator(); wow.frequency.value = 0.21;
   const flut = ac.createOscillator(); flut.frequency.value = 5.7;
-  wowD = G(7); flutD = G(2);
-  wow.connect(wowD); flut.connect(flutD); wow.start(); flut.start();
-  if (ac.createConstantSource) { bend = ac.createConstantSource(); bend.offset.value = 0; bend.start(); }
+  wow.start(); flut.start();
 
   // マスター：コンプ → メイクアップ → リミッター → オン／オフ
   const comp = ac.createDynamicsCompressor();
@@ -220,12 +219,16 @@ function initAudio() {
 
   // 本体の経路：軽い飽和 → 明るさで開くフィルター → 低域カット → ドライ／残響／エコー
   bus = G(1);
-  const sat = ac.createWaveShaper(); sat.curve = softCurve(1.6); sat.oversample = "2x";
+  const sat = ac.createWaveShaper(); sat.curve = softCurve(1.6);   // 飽和は軽いので、オーバーサンプリングなしで十分
   warm = BQ("lowpass", 4000, 0.5);
   const hp = BQ("highpass", 55, 0.7);
-  bus.connect(G(0.9)).connect(sat).connect(warm).connect(hp);
+  const wob = ac.createDelay(0.1); wob.delayTime.value = 0.02;
+  wow.connect(G(0.004)).connect(wob.delayTime);      // ゆっくりしたよれ（±10セントほど）
+  flut.connect(G(0.00006)).connect(wob.delayTime);   // 細かい震え（±4セントほど）
+  bus.connect(wob).connect(G(0.9)).connect(sat).connect(warm).connect(hp);
   hp.connect(G(0.5)).connect(comp);
-  conv = ac.createConvolver(); conv.buffer = makeImpulse(8);
+  // 残響：長さを8秒→5秒にして軽く（余韻の長さはテープエコーの繰り返しでも補う）
+  conv = ac.createConvolver(); conv.buffer = makeImpulse(5);
   revGain = G(0.8);
   hp.connect(conv); conv.connect(revGain).connect(comp);
   const dl = ac.createDelay(2); dl.delayTime.value = 0.68;
@@ -262,11 +265,11 @@ function initAudio() {
   linkPitch(d1); linkPitch(d2); d1.start(); d2.start();
   drone = { d1, d2, g: dG };
 }
-// テープの揺れ・音程の沈みをつなぐ／外す
-function linkPitch(o) { wowD.connect(o.detune); flutD.connect(o.detune); if (bend) bend.connect(o.detune); }
-function unlinkPitch(o) {
-  try { wowD.disconnect(o.detune); flutD.disconnect(o.detune); if (bend) bend.disconnect(o.detune); } catch (_) {}
-}
+// 音程の沈み／浮き（上下ドラッグ）の対象として登録／解除する。
+// 音程は指が動いたときだけ、まとめて書き換える（常時つないでおく方式より軽い）
+const pitched = new Set();
+function linkPitch(o, det = 0) { o._det = det; o.detune.value = det + bendSent; pitched.add(o); }
+function unlinkPitch(o) { pitched.delete(o); }
 
 /* ---------- マス目（1マス＝土台の1声） ---------- */
 let GX = 6, GY = 4, gridSpec = "6x4";
@@ -420,7 +423,7 @@ function tick() {
     const midi = lerp(free, snap, coh);
     p.midi = midi;
     const freq = midiToFreq(midi);
-    if (Math.abs(freq / p.freq - 1) > 0.002) { p.o.frequency.setTargetAtTime(freq, t, glide); p.freq = freq; }
+    if (Math.abs(freq / p.freq - 1) > 0.004) { p.o.frequency.setTargetAtTime(freq, t, glide); p.freq = freq; }
     const sw = swell[i];
     const level = (0.25 + 0.75 * c.s) * (0.6 + 0.4 * smooth(0.05, 0.4, c.v)) * (1 + 2.5 * sw) * norm * 0.22;
     p.g.gain.setTargetAtTime(level, t, sw > 0.05 ? 0.25 : 0.8);
@@ -444,8 +447,9 @@ function tick() {
     }
   }
   // 音程の沈み／浮き：指の動きをそのまま毎回送らず、ここで1/15秒ごとにまとめて送る
-  if (bend && bendTarget !== bendSent) {
-    bend.offset.setTargetAtTime(bendTarget, t, bendId === null ? 0.5 : 0.25);
+  if (bendTarget !== bendSent) {
+    const tc = bendId === null ? 0.5 : 0.25;
+    for (const o of pitched) o.detune.setTargetAtTime(o._det + bendTarget, t, tc);
     bendSent = bendTarget;
   }
 
@@ -514,9 +518,9 @@ function breathNote(ci, dur, T, K, pcsFor, coh, breath) {
   lp.connect(env).connect(kill); out.connect(bus);
   const oscs = [];
   const add = (type, mult, level, det, dest) => {
-    const o = ac.createOscillator(); o.type = type; o.frequency.value = f * mult; o.detune.value = det;
+    const o = ac.createOscillator(); o.type = type; o.frequency.value = f * mult;
     const g = ac.createGain(); g.gain.value = level; o.connect(g).connect(dest);
-    linkPitch(o); o.start(t); o.stop(tEnd); oscs.push(o);
+    linkPitch(o, det); o.start(t); o.stop(tEnd); oscs.push(o);
   };
   // 部品は必要なものだけ：サイン波1本＋（鮮やかなマスだけ）ノコギリ波2本＋（明るいマスだけ）きらめき
   add("sine", 1, 1.1 - 0.55 * s, 0, lp);
