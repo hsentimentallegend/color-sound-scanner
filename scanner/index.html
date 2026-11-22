@@ -66,7 +66,8 @@
 <div id="focusRing"></div>
 
 <div id="ui">
-  <div class="row"><span>速さ</span><input id="speed" type="range" min="0" max="1" step="0.01" value="0.45"><span id="speedL">6.0秒</span></div>
+  <div class="row"><span>速さ</span><input id="speed" type="range" min="0" max="1" step="0.01" value="0.72"><span id="speedL">6.0秒</span></div>
+  <div class="row"><span>余韻</span><input id="sus" type="range" min="0" max="1" step="0.01" value="0"><span id="susL">短い</span></div>
   <div class="row"><span>密度</span><input id="dens" type="range" min="0" max="1" step="0.01" value="0.5"><span id="densL">ふつう</span></div>
   <div class="row"><span>残響</span><input id="rev" type="range" min="0" max="1" step="0.01" value="0.5"><span id="revL">50%</span></div>
   <div class="row"><span>向き</span><div class="seg" id="dirSeg">
@@ -99,7 +100,7 @@ const video = $("video");
 const ana = $("ana"), actx2d = ana.getContext("2d", { willReadFrequently: true });
 const snap = document.createElement("canvas"), sctx = snap.getContext("2d");   // スキャン中に止めて見せる1枚
 const keyEl = $("key"), scanBtn = $("scan"), loopBtn = $("loop"), ring = $("focusRing");
-const speedEl = $("speed"), densEl = $("dens"), revEl = $("rev");
+const speedEl = $("speed"), densEl = $("dens"), revEl = $("rev"), susEl = $("sus");
 
 /* ---------- 便利関数 ---------- */
 function rgb2hsv(r, g, b) {
@@ -244,6 +245,10 @@ function playNote(midi, t, dur, h, s, v, pan) {
   if (!vo) vo = voices.reduce((a, b) => (a.startAt <= b.startAt ? a : b));   // 空きがなければいちばん古い声
   wake(vo);
   const P = TIMBRE[timbreOf(h)], f = midiToFreq(midi);
+  // 余韻：上げるほど減衰がゆっくりになり、残る音量が増え、離れたあとも長く尾を引く（最大でドローンのように重なる）
+  const x = +susEl.value;
+  const tau = P.tau * lerp(1, 6, x), sus = lerp(P.sus, Math.max(P.sus + 0.3, 0.55), x),
+        rel = Math.min(8, P.rel * lerp(1, 8, x)), bTau = P.bTau * lerp(1, 3, x);
   const vel = 0.35 + 0.65 * smooth(0.2, 0.85, s), peak = 0.17 * vel * (0.75 + 0.25 * v);
   const e = vo.env.gain, t0 = Math.max(t - 0.012, ac.currentTime);
   holdAt(e, t0); e.linearRampToValueAtTime(0, t);   // 前の音が残っていたら直前で消す
@@ -252,19 +257,19 @@ function playNote(midi, t, dur, h, s, v, pan) {
   vo.aG.gain.setValueAtTime(P.a, t);
   holdAt(vo.bG.gain, t0);
   vo.bG.gain.setValueAtTime(P.b * (0.6 + 0.4 * vel), t);
-  vo.bG.gain.setTargetAtTime(0, t + 0.005, P.bTau);
+  vo.bG.gain.setTargetAtTime(0, t + 0.005, bTau);
   if (vo.pan) vo.pan.pan.setValueAtTime(clamp(pan, -1, 1), t);
   // 打って、減衰して、同じ色が続くあいだは少し残り、離れたら消える
   e.linearRampToValueAtTime(peak, t + P.atk);
-  e.setTargetAtTime(peak * P.sus, t + P.atk, P.tau);
+  e.setTargetAtTime(peak * sus, t + P.atk, tau);
   const tEnd = t + Math.max(dur, P.atk + 0.05);
-  e.setTargetAtTime(0, tEnd, P.rel / 3);
+  e.setTargetAtTime(0, tEnd, rel / 3);
   // 明るいマスほど音色も明るく、すぐ落ち着く
   const lpf = vo.lp.frequency;
   holdAt(lpf, t0);
   lpf.setValueAtTime(Math.min(9000, f * (P.bright + 4 * v)), t);
   lpf.setTargetAtTime(Math.min(5000, f * P.bright * 0.7), t + 0.01, 0.35);
-  vo.startAt = t; vo.freeAt = tEnd + P.rel * 2;
+  vo.startAt = t; vo.freeAt = tEnd + rel * 2;
 }
 function playTick(t, v, pan) {
   const k = ticks[tickIdx++ % ticks.length];
@@ -279,7 +284,8 @@ function playTick(t, v, pan) {
 let res = RES[1], dir = "x", looping = false;
 const scan = { on: false, t0: 0, dur: 6, step: 0, steps: 16, lanes: 12, cells: null, plan: null, key: null,
                glow: null, stopAt: 0 };
-const passDur = () => lerp(12, 2.5, Math.pow(+speedEl.value, 0.9));
+// 1回のスキャンの長さ：60秒（ゆっくり読み上げる）〜2.5秒。耳の感じ方に合わせて指数的に
+const passDur = () => 60 * Math.pow(2.5 / 60, +speedEl.value);
 
 function crop() {
   const W = innerWidth, H = innerHeight, vw = video.videoWidth, vh = video.videoHeight;
@@ -353,6 +359,7 @@ function laneMidi(key, lanes) {
 function makePlan(cap) {
   const { cells, steps, lanes, key } = cap, dens = +densEl.value;
   const sMin = lerp(0.45, 0.14, dens), vMin = lerp(0.3, 0.12, dens);
+  const sx = +susEl.value, restrike = sx > 0.85 ? Infinity : Math.round(lerp(2, 6, sx));
   const pitches = laneMidi(key, lanes);
   const plan = Array.from({ length: steps }, () => []);
   for (let j = 0; j < lanes; j++) {
@@ -361,9 +368,9 @@ function makePlan(cap) {
       const c = i < steps ? cells[i][j] : null;
       const tone = c && c.s >= sMin && c.v >= vMin;
       const white = c && !tone && c.s < 0.2 && c.v > lerp(0.92, 0.72, dens);
-      // マリンバ風（暖色）は伸ばせないので、同じ色が続いても2刻みごとに打ち直す
+      // マリンバ風（暖色）は伸ばせないので、同じ色が続くと打ち直す（余韻が長いほど間隔を空け、最大では打ち直さない）
       const cont = run && tone && run.kind === "tone" && hueDist(c.h, run.h) < 28 && Math.abs(c.v - run.v) < 0.25 &&
-                   !(timbreOf(run.h) === 0 && run.len >= 2);
+                   !(timbreOf(run.h) === 0 && run.len >= restrike);
       if (cont) { run.len++; continue; }
       if (run) { plan[run.i].push(run); run = null; }
       if (tone) run = { kind: "tone", i, j, len: 1, h: c.h, s: c.s, v: c.v, m: pitches[j] };
@@ -510,9 +517,11 @@ view.addEventListener("pointerup", e => { if (started) focusAt(e.clientX, e.clie
 
 /* ---------- 操作 ---------- */
 const densText = x => x < 0.25 ? "まばら" : x < 0.6 ? "ふつう" : x < 0.85 ? "多め" : "ぎっしり";
-const updSpeed = () => { $("speedL").textContent = passDur().toFixed(1) + "秒"; };
+const updSpeed = () => { const d = passDur(); $("speedL").textContent = (d < 10 ? d.toFixed(1) : Math.round(d)) + "秒"; };
 speedEl.addEventListener("input", updSpeed);
 densEl.addEventListener("input", () => { $("densL").textContent = densText(+densEl.value); });
+const susText = x => x < 0.15 ? "短い" : x < 0.45 ? "ふつう" : x < 0.8 ? "長い" : "ロングトーン";
+susEl.addEventListener("input", () => { $("susL").textContent = susText(+susEl.value); });
 revEl.addEventListener("input", () => {
   $("revL").textContent = Math.round(revEl.value * 100) + "%";
   if (ac) revGain.gain.setTargetAtTime(+revEl.value, ac.currentTime, 0.1);
