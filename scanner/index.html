@@ -13,7 +13,7 @@
   #view { position:fixed; inset:0; width:100%; height:100%; display:block; touch-action:none; }
   video, #ana { display:none; }
 
-  #key { position:fixed; right:12px; top:calc(env(safe-area-inset-top) + 8px); font-size:13px; text-align:right;
+  #key { position:fixed; right:12px; top:calc(env(safe-area-inset-top) + 8px); font-size:13px; text-align:right; white-space:pre-line;
     text-shadow:0 1px 3px #000; pointer-events:none; opacity:.92; line-height:1.5; }
   #key[data-note]::after { content:attr(data-note); display:block; font-size:11px; opacity:.8; }
   #hint { position:fixed; left:12px; top:calc(env(safe-area-inset-top) + 8px); font-size:11px; opacity:.7;
@@ -70,6 +70,9 @@
   <div class="row"><span>余韻</span><input id="sus" type="range" min="0" max="1" step="0.01" value="0"><span id="susL">短い</span></div>
   <div class="row"><span>密度</span><input id="dens" type="range" min="0" max="1" step="0.01" value="0.5"><span id="densL">ふつう</span></div>
   <div class="row"><span>残響</span><input id="rev" type="range" min="0" max="1" step="0.01" value="0.5"><span id="revL">50%</span></div>
+  <div class="row"><span>低音</span><div class="seg" id="bassSeg">
+    <button data-b="root">主音だけ</button><button data-b="prog" class="on">進行する</button>
+  </div><span id="bassL"></span></div>
   <div class="row"><span>向き</span><div class="seg" id="dirSeg">
     <button data-d="x" class="on">横へ</button><button data-d="y">下へ</button>
   </div><span id="dirL"></span></div>
@@ -234,7 +237,11 @@ function initAudio() {
   b1.type = "sine"; b2.type = "triangle"; b1.frequency.value = b2.frequency.value = 55;
   b1.connect(bg); b2.connect(b2g).connect(bg); bg.connect(bus);
   b1.start(); b2.start();
-  bass = { b1, b2, g: bg };
+  // 和音のパッド：根音の上に3度・5度・7度を、こもった三角波でうっすら重ねる（和音が変わると、音がなめらかに滑って移る）
+  const padG = G(0), padLP = BQ("lowpass", 900, 0.4);
+  padLP.connect(padG).connect(bus);
+  const pad = [0, 1, 2].map(() => { const o = ac.createOscillator(); o.type = "triangle"; o.frequency.value = 220; o.connect(padLP); o.start(); return o; });
+  bass = { b1, b2, g: bg, pad, padG };
 }
 function wake(vo) { if (!vo.awake) { vo.env.connect(vo.dest); vo.awake = true; } }
 function sleep(vo) { if (vo.awake) { vo.env.disconnect(); vo.awake = false; } }
@@ -323,6 +330,7 @@ function capture() {
   const cells = Array.from({ length: steps }, () => new Array(lanes));
   const hist = new Float32Array(12), histV = new Float32Array(12), histX = new Float32Array(12), histY = new Float32Array(12);
   let vsum = 0, gray = 0;
+  const stX = new Float32Array(steps), stY = new Float32Array(steps), stW = new Float32Array(steps);   // 列ごとの色
   for (let i = 0; i < n; i++) {
     const col = i % cols, row = Math.floor(i / cols);
     const [h, s0, v] = rgb2hsv(Math.min(255, R[i] / px2 * wbc.r), Math.min(255, Gc[i] / px2 * wbc.g), Math.min(255, B[i] / px2 * wbc.b));
@@ -334,19 +342,20 @@ function capture() {
     if (s > 0.15 && v > 0.15) {
       const k = Math.floor(h / 30) % 12, w = s * s, a = h * Math.PI / 180;
       hist[k] += w; histV[k] += v * w; histX[k] += Math.cos(a) * w; histY[k] += Math.sin(a) * w;
+      stX[step] += Math.cos(a) * w * v; stY[step] += Math.sin(a) * w * v; stW[step] += w * v;
     }
   }
   // 調：いちばん多い色の感情から（画面の大半が白・黒・グレーなら明るさで）
   let best = 0, total = 0;
   for (let k = 0; k < 12; k++) { total += hist[k]; if (hist[k] > hist[best]) best = k; }
   const chroma = total > n * 0.03 && gray / n < 0.8;
-  let dom;
+  let dom, hue = null;
   if (chroma) {
-    let hue = Math.atan2(histY[best], histX[best]) * 180 / Math.PI; if (hue < 0) hue += 360;
+    hue = Math.atan2(histY[best], histX[best]) * 180 / Math.PI; if (hue < 0) hue += 360;
     dom = classify(hue / 360, true, histV[best] / hist[best]);
   } else dom = classify(0, false, vsum / n);
   const rootPc = ((freqToMidi(dom.baseFreq) % 12) + 12) % 12;
-  return { cells, key: { ...dom, rootPc }, steps, lanes };
+  return { cells, key: { ...dom, rootPc, hue }, steps, lanes, stX, stY, stW };
 }
 // 段ごとの音の高さ：調の音階を下から順に積む（段が多いほど音域が広がる）
 function laneMidi(key, lanes) {
@@ -382,6 +391,72 @@ function makePlan(cap) {
   return plan;
 }
 
+/* ---------- 低音の進行 ----------
+   スキャンを4つの区間に分け、区間ごとにいちばん多い色を読む。
+   調を決めた色（主役の色）との色相の離れ具合で、調の中のどの和音にするかを決める：
+     ほぼ同じ色 → I（落ち着く）／少し離れる → IV か V／もっと離れる → vi か ii（minor では VI か VII）／反対の色 → iii
+   色相環のどちら回りに離れたかで、IV 側か V 側かが分かれる。色が薄い区間は前の和音を続ける */
+const PARENT = { major: "major", pentatonic_major: "major", minor: "minor", pentatonic_minor: "minor", blues: "minor" };
+let bassMode = "prog";
+function degreeFor(d, minor) {
+  const a = Math.abs(d);
+  if (a < 30) return 0;
+  if (a < 90) return d > 0 ? 3 : 4;
+  if (a < 150) return d > 0 ? 5 : (minor ? 6 : 1);
+  return 2;
+}
+function triadOf(key, deg) {
+  const st = SCALES[PARENT[key.scale]].steps, semi = j => st[j % 7] + 12 * Math.floor(j / 7);
+  const r = semi(deg), third = semi(deg + 2) - r, fifth = semi(deg + 4) - r, sev = semi(deg + 6) - r;
+  const pc = (key.rootPc + r) % 12;
+  const name = NOTE_NAMES[pc] + (fifth === 6 ? "dim" : third === 3 ? "m" : "");
+  return { deg, pc, iv: [0, third, fifth, sev], name };
+}
+function makeProgression(cap) {
+  const key = cap.key, minor = PARENT[key.scale] === "minor";
+  const nSeg = 4, segLen = cap.steps / nSeg, out = [];
+  let ref = key.hue, prevDeg = 0;
+  for (let k = 0; k < nSeg; k++) {
+    let x = 0, y = 0, w = 0;
+    const a = Math.round(k * segLen), b = Math.round((k + 1) * segLen);
+    for (let i = a; i < b; i++) { x += cap.stX[i]; y += cap.stY[i]; w += cap.stW[i]; }
+    let deg = prevDeg;
+    if (bassMode === "prog" && w > (b - a) * cap.lanes * 0.02) {
+      let h = Math.atan2(y, x) * 180 / Math.PI; if (h < 0) h += 360;
+      if (ref === null) ref = h;                        // 画面全体が無彩色なら、最初に色が出た区間を基準に
+      const d = ((h - ref + 540) % 360) - 180;          // -180〜180：どちら回りにどれだけ離れたか
+      deg = degreeFor(d, minor);
+    }
+    if (bassMode !== "prog") deg = 0;
+    out.push({ start: a, ch: triadOf(key, deg) });
+    prevDeg = deg;
+  }
+  return out;
+}
+const voiceNear = (pc, center) => { let m = center - 6; while (((m % 12) + 12) % 12 !== pc) m++; return m; };
+// 和音を切り替える：低音はいったん少し沈めてから新しい根音で鳴り直し、パッドは滑らかに滑って移る
+function setChord(ch, t, first) {
+  const lvl = scan.key.emotion === "Depth" ? 0.12 : 0.08;
+  const bm = voiceNear(ch.pc, 41);   // 根音は B1〜A#2 あたり
+  const g = bass.g.gain;
+  holdAt(g, Math.max(ac.currentTime, t - 0.05));
+  if (!first) g.linearRampToValueAtTime(lvl * 0.35, t);
+  g.setTargetAtTime(lvl, t, first ? 0.3 : 0.08);
+  bass.b1.frequency.setValueAtTime(midiToFreq(bm), t);
+  bass.b2.frequency.setValueAtTime(midiToFreq(bm), t);
+  if (bassMode === "prog") [ch.iv[1], ch.iv[2], ch.iv[3]].forEach((iv, k) => {
+    const m = voiceNear((ch.pc + iv) % 12, 57 + k * 3);
+    bass.pad[k].frequency.setTargetAtTime(midiToFreq(m), t, first ? 0.01 : 0.12);
+  });
+  holdAt(bass.padG.gain, Math.max(ac.currentTime, t - 0.01));
+  bass.padG.gain.setTargetAtTime(bassMode === "prog" ? 0.045 : 0, t, first ? 0.4 : 0.25);
+}
+function keyText(cur) {
+  const k = scan.key, head = `${k.emotion} · ${NOTE_NAMES[k.rootPc]} ${SCALES[k.scale].ja}`;
+  if (bassMode !== "prog" || !scan.prog) return head;
+  return head + "\n" + scan.prog.map((p, i) => (i === cur ? `［${p.ch.name}］` : p.ch.name)).join(" → ");
+}
+
 function startPass(t) {
   const cap = capture();
   scan.cells = cap.cells; scan.steps = cap.steps; scan.lanes = cap.lanes; scan.key = cap.key;
@@ -390,13 +465,10 @@ function startPass(t) {
   scan.dur = passDur(); scan.t0 = t; scan.step = 0;
   const stepLen = scan.dur / scan.steps;
   echo.delayTime.setTargetAtTime(Math.min(1.5, stepLen * 1.5), ac.currentTime, 0.05);
-  // 土台の主音：スキャンの頭でふわっと入る
-  let bm = 33 + ((scan.key.rootPc - 9 + 12) % 12); if (bm < 36) bm += 12;
-  bass.b1.frequency.setTargetAtTime(midiToFreq(bm), t, 0.05);
-  bass.b2.frequency.setTargetAtTime(midiToFreq(bm), t, 0.05);
-  holdAt(bass.g.gain, ac.currentTime);
-  bass.g.gain.setTargetAtTime(scan.key.emotion === "Depth" ? 0.12 : 0.07, t, 0.3);
-  keyEl.textContent = `${scan.key.emotion} · ${NOTE_NAMES[scan.key.rootPc]} ${SCALES[scan.key.scale].ja}`;
+  // 低音の進行（主音だけのときは I が続く）。和音はスケジューラーが区間の頭で切り替える
+  scan.prog = makeProgression(cap);
+  scan.firstChord = bass.g.gain.value < 0.01;
+  keyEl.textContent = keyText(-1);
 }
 function startScan() {
   if (!started) return;
@@ -409,6 +481,7 @@ function stopScan() {
   scan.on = false;
   const t = ac.currentTime;
   holdAt(bass.g.gain, t); bass.g.gain.setTargetAtTime(0, t, 0.6);
+  holdAt(bass.padG.gain, t); bass.padG.gain.setTargetAtTime(0, t, 0.6);
   scan.stopAt = performance.now();
   scanBtn.textContent = "スキャン"; scanBtn.classList.remove("on");
 }
@@ -425,6 +498,12 @@ function scheduler() {
       stopScan(); break;
     }
     const i = scan.step, prog = (i + 0.5) / scan.steps;
+    const ci = scan.prog.findIndex(p => p.start === i);
+    if (ci >= 0) {
+      const prev = ci > 0 ? scan.prog[ci - 1].ch : null, ch = scan.prog[ci].ch;
+      if (!prev || prev.deg !== ch.deg) { setChord(ch, t, scan.firstChord); scan.firstChord = false; }
+      setTimeout(() => { if (scan.on) keyEl.textContent = keyText(ci); }, Math.max(0, (t - now) * 1000));
+    }
     let n = 0;
     for (const ev of scan.plan[i]) {
       // 横へ：バーの位置で左右に動く。下へ：段（左右の位置）でそのまま
@@ -537,6 +616,11 @@ $("resSeg").addEventListener("click", e => {
   for (const x of $("resSeg").children) x.classList.toggle("on", x === b);
   res = RES[+b.dataset.r];
   $("resL").textContent = res.lanes + "×" + res.steps;
+});
+$("bassSeg").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  for (const x of $("bassSeg").children) x.classList.toggle("on", x === b);
+  bassMode = b.dataset.b;   // 次のスキャン（ループなら次の1周）から反映
 });
 scanBtn.addEventListener("click", () => (scan.on ? stopScan() : startScan()));
 loopBtn.addEventListener("click", () => {
