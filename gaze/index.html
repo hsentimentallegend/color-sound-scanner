@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ja">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
@@ -62,23 +62,23 @@
 <video id="video" playsinline muted autoplay></video>
 <canvas id="ana"></canvas>
 
-<div id="hint">タップ：焦点<br>長押し・なぞる：その場所が膨らむ<br>上下ドラッグ：ピッチベンド</div>
+<div id="hint">Tap: focus<br>Hold / trace: that spot swells<br>Drag up/down: pitch bend</div>
 <div id="key"></div>
 <div id="focusRing"></div>
 
 <div id="ui">
-  <div class="row"><span>まとまり</span><input id="coh" type="range" min="0" max="1" step="0.001" value="0.25"><span id="cohL">ノイズ寄り</span></div>
-  <div class="row"><span>歪み</span><input id="fuzz" type="range" min="0" max="1" step="0.01" value="0.7"><span id="fuzzL">70%</span></div>
-  <div class="row"><span>残響</span><input id="rev" type="range" min="0" max="1" step="0.01" value="0.6"><span id="revL">60%</span></div>
-  <div class="row"><span>マス目</span><div class="seg" id="gridSeg">
+  <div class="row"><span>Blend</span><input id="coh" type="range" min="0" max="1" step="0.001" value="0.25"><span id="cohL">Noisy</span></div>
+  <div class="row"><span>Fuzz</span><input id="fuzz" type="range" min="0" max="1" step="0.01" value="0.7"><span id="fuzzL">70%</span></div>
+  <div class="row"><span>Reverb</span><input id="rev" type="range" min="0" max="1" step="0.01" value="0.6"><span id="revL">60%</span></div>
+  <div class="row"><span>Grid</span><div class="seg" id="gridSeg">
     <button data-g="3x2">6</button><button data-g="6x4" class="on">24</button><button data-g="8x6">48</button>
-  </div><span id="gridL">24声</span></div>
-  <div class="btns"><button id="lock">主音<small>ロック</small></button><button id="power">ON</button><span class="pad"></span></div>
+  </div><span id="gridL">24 voices</span></div>
+  <div class="btns"><button id="lock">Key<small>lock</small></button><button id="power">ON</button><span class="pad"></span></div>
 </div>
 
 <div id="start">
   <h1>Color Sound Gazer</h1>
-  <p>画面のマス目ひとつひとつの色が、そのまま歪んだ音の壁になります。<br>タップしてカメラと音を開始<br>（PCはスペースキーでオン／オフ）</p>
+  <p>Every cell's color on screen becomes a distorted wall of sound.<br>Tap to start the camera and sound<br>(on a computer, Space turns it on/off)</p>
   <p id="msg"></p>
 </div>
 
@@ -120,11 +120,11 @@ const freqToMidi = f => Math.round(69 + 12 * Math.log2(f / 440));
 /* ---------- 色 → 感情 → 調（Color Sound Scanner / Generator と同じ表） ---------- */
 const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 const SCALES = {
-  major:            { steps: [0, 2, 4, 5, 7, 9, 11], ja: 'メジャー' },
-  minor:            { steps: [0, 2, 3, 5, 7, 8, 10], ja: 'マイナー' },
-  pentatonic_major: { steps: [0, 2, 4, 7, 9],        ja: 'メジャー・ペンタトニック' },
-  pentatonic_minor: { steps: [0, 3, 5, 7, 10],       ja: 'マイナー・ペンタトニック' },
-  blues:            { steps: [0, 3, 5, 6, 7, 10],    ja: 'ブルース' }
+  major:            { steps: [0, 2, 4, 5, 7, 9, 11], ja: 'major' },
+  minor:            { steps: [0, 2, 3, 5, 7, 8, 10], ja: 'minor' },
+  pentatonic_major: { steps: [0, 2, 4, 7, 9],        ja: 'major pentatonic' },
+  pentatonic_minor: { steps: [0, 3, 5, 7, 10],       ja: 'minor pentatonic' },
+  blues:            { steps: [0, 3, 5, 6, 7, 10],    ja: 'blues' }
 };
 function classify(h, chroma, v) {
   if (!chroma) {
@@ -283,7 +283,7 @@ function buildGrid(spec) {
   ana.width = GX * CELL_PX; ana.height = GY * CELL_PX;
   cells = Array.from({ length: GX * GY }, () => ({ h: 0, s: 0, v: 0 }));
   swell = new Float32Array(GX * GY);
-  $("gridL").textContent = GX * GY + "声";
+  $("gridL").textContent = GX * GY + " voices";
   if (!ac) return;
   // 古い声部はフェードアウトしてから止める（プツッとさせない）
   const t = ac.currentTime, old = voices;
@@ -470,8 +470,8 @@ function tick() {
   pedal.c.frequency.setTargetAtTime(pf * 2, t, 0.05);
   pedal.g.gain.setTargetAtTime(locked ? PEDAL_LEVEL : 0, t, locked ? 0.25 : 0.4);
 
-  keyEl.textContent = (locked ? '［固定］' : '') + `${K.emotion} · ${NOTE_NAMES[K.rootPc]} ${SCALES[K.scale].ja}` +
-    (coh > 0.5 ? ` ｜ ${chordLabel}` : '');
+  keyEl.textContent = (locked ? '[Locked] ' : '') + `${K.emotion} · ${NOTE_NAMES[K.rootPc]} ${SCALES[K.scale].ja}` +
+    (coh > 0.5 ? ` | ${chordLabel}` : '');
   // 電源ボタンを、調を決めた色に（無彩色なら画面の明るさに合わせた白〜グレー〜黒）
   if (chroma) {
     const sat = Math.round(clamp(Math.sqrt(hist[best] / histN[best]), 0, 1) * 85);   // うすい色はうすく
@@ -497,13 +497,13 @@ function toggleLock() {
                bg: powerBtn.style.background, fg: powerBtn.style.color };
     lockBtn.classList.add("on");
     lockBtn.style.background = locked.bg; lockBtn.style.color = locked.fg || "#fff";
-    lockBtn.innerHTML = `${NOTE_NAMES[key.rootPc]}<small>固定中</small>`;
+    lockBtn.innerHTML = `${NOTE_NAMES[key.rootPc]}<small>locked</small>`;
   } else {
     locked = null;
     glideSlowUntil = performance.now() + 1200;
     lockBtn.classList.remove("on");
     lockBtn.style.background = ""; lockBtn.style.color = "";
-    lockBtn.innerHTML = "主音<small>ロック</small>";
+    lockBtn.innerHTML = "Key<small>lock</small>";
   }
 }
 function nearestTone(m, rootPc, pcs) {
@@ -596,7 +596,7 @@ async function focusAt(cx, cy) {
   }
   if (!ok) {
     ring.className = "show fail";
-    if (!focusNoticeShown) { focusNoticeShown = true; keyEl.dataset.note = "この端末のブラウザは焦点の指定に対応していません"; }
+    if (!focusNoticeShown) { focusNoticeShown = true; keyEl.dataset.note = "This browser can't set the focus point"; }
   }
   focusTimer = setTimeout(() => { ring.className = ""; delete keyEl.dataset.note; }, 900);
 }
@@ -638,7 +638,7 @@ function render() {
 }
 
 /* ---------- 操作 ---------- */
-function cohText(x) { return x < 0.15 ? "ノイズ" : x < 0.45 ? "ノイズ寄り" : x < 0.8 ? "和音寄り" : "コード"; }
+function cohText(x) { return x < 0.15 ? "Noise" : x < 0.45 ? "Noisy" : x < 0.8 ? "Chordal" : "Chord"; }
 cohEl.addEventListener("input", () => { $("cohL").textContent = cohText(+cohEl.value); });
 fuzzEl.addEventListener("input", () => { $("fuzzL").textContent = Math.round(fuzzEl.value * 100) + "%"; });
 revEl.addEventListener("input", () => { $("revL").textContent = Math.round(revEl.value * 100) + "%"; });
@@ -678,8 +678,8 @@ $("start").addEventListener("click", async () => {
     setInterval(tick, TICK);
     render();
   } catch (err) {
-    $("msg").textContent = "カメラを開始できませんでした：" + (err && err.message || err) +
-      "（スマホでは https で開く必要があります）";
+    $("msg").textContent = "Couldn't start the camera: " + (err && err.message || err) +
+      " (on a phone, open the page over https)";
   }
 });
 })();

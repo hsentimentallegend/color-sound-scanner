@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ja">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
@@ -69,25 +69,25 @@
 <video id="video" playsinline muted autoplay></video>
 <canvas id="ana"></canvas>
 
-<button id="dir"><b>→</b><small>横へ</small></button>
-<div id="hint">ボタン：スキャン開始／停止<br>タップ：焦点</div>
+<button id="dir"><b>→</b><small>across</small></button>
+<div id="hint">Button: start / stop scan<br>Tap: focus</div>
 <div id="key"></div>
 <div id="focusRing"></div>
 
 <div id="ui">
-  <div class="row"><span>速さ</span><input id="speed" type="range" min="0" max="1" step="0.01" value="0.72"><span id="speedL">6.0秒</span></div>
-  <div class="row"><span>余韻</span><input id="sus" type="range" min="0" max="1" step="0.01" value="0"><span id="susL">短い</span></div>
-  <div class="row"><span>密度</span><input id="dens" type="range" min="0" max="1" step="0.01" value="0.5"><span id="densL">ふつう</span></div>
-  <div class="row"><span>残響</span><input id="rev" type="range" min="0" max="1" step="0.01" value="0.5"><span id="revL">50%</span></div>
-  <div class="row"><span>細かさ</span><div class="seg" id="resSeg">
-    <button data-r="0">粗い</button><button data-r="1" class="on">ふつう</button><button data-r="2">細かい</button>
+  <div class="row"><span>Speed</span><input id="speed" type="range" min="0" max="1" step="0.01" value="0.72"><span id="speedL">6.0 s</span></div>
+  <div class="row"><span>Sustain</span><input id="sus" type="range" min="0" max="1" step="0.01" value="0"><span id="susL">Short</span></div>
+  <div class="row"><span>Density</span><input id="dens" type="range" min="0" max="1" step="0.01" value="0.5"><span id="densL">Medium</span></div>
+  <div class="row"><span>Reverb</span><input id="rev" type="range" min="0" max="1" step="0.01" value="0.5"><span id="revL">50%</span></div>
+  <div class="row"><span>Detail</span><div class="seg" id="resSeg">
+    <button data-r="0">Coarse</button><button data-r="1" class="on">Medium</button><button data-r="2">Fine</button>
   </div><span id="resL">12×16</span></div>
-  <div class="btns"><button id="loop">ループ<small>オフ</small></button><button id="scan">スキャン</button><button id="bass" class="on">進行<small>オン</small></button></div>
+  <div class="btns"><button id="loop">Loop<small>off</small></button><button id="scan">Scan</button><button id="bass" class="on">Chords<small>on</small></button></div>
 </div>
 
 <div id="start">
   <h1>Color Sound Scanner</h1>
-  <p>ボタンを押すと、スキャンバーが画面を横切り、<br>通った場所の色を順に鳴らします。<br>タップしてカメラを開始（PCはスペースキーでスキャン）</p>
+  <p>Press the button and a scan bar sweeps across the screen,<br>playing the colors it passes, one by one.<br>Tap to start the camera (on a computer, Space scans)</p>
   <p id="msg"></p>
 </div>
 
@@ -131,11 +131,11 @@ const hueDist = (a, b) => { const d = Math.abs(a - b) % 360; return d > 180 ? 36
 /* ---------- 色 → 感情 → 調（Color Sound Generator のルール） ---------- */
 const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 const SCALES = {
-  major:            { steps: [0, 2, 4, 5, 7, 9, 11], ja: 'メジャー' },
-  minor:            { steps: [0, 2, 3, 5, 7, 8, 10], ja: 'マイナー' },
-  pentatonic_major: { steps: [0, 2, 4, 7, 9],        ja: 'メジャー・ペンタトニック' },
-  pentatonic_minor: { steps: [0, 3, 5, 7, 10],       ja: 'マイナー・ペンタトニック' },
-  blues:            { steps: [0, 3, 5, 6, 7, 10],    ja: 'ブルース' }
+  major:            { steps: [0, 2, 4, 5, 7, 9, 11], ja: 'major' },
+  minor:            { steps: [0, 2, 3, 5, 7, 8, 10], ja: 'minor' },
+  pentatonic_major: { steps: [0, 2, 4, 7, 9],        ja: 'major pentatonic' },
+  pentatonic_minor: { steps: [0, 3, 5, 7, 10],       ja: 'minor pentatonic' },
+  blues:            { steps: [0, 3, 5, 6, 7, 10],    ja: 'blues' }
 };
 function classify(h, chroma, v) {
   if (!chroma) {
@@ -457,7 +457,7 @@ function setChord(ch, t, first) {
 function keyText(cur) {
   const k = scan.key, head = `${k.emotion} · ${NOTE_NAMES[k.rootPc]} ${SCALES[k.scale].ja}`;
   if (bassMode !== "prog" || !scan.prog) return head;
-  return head + "\n" + scan.prog.map((p, i) => (i === cur ? `［${p.ch.name}］` : p.ch.name)).join(" → ");
+  return head + "\n" + scan.prog.map((p, i) => (i === cur ? `[${p.ch.name}]` : p.ch.name)).join(" → ");
 }
 
 function startPass(t) {
@@ -478,7 +478,7 @@ function startScan() {
   if (ac.state !== "running") ac.resume();
   scan.on = true;
   startPass(ac.currentTime + 0.08);
-  scanBtn.textContent = "停止"; scanBtn.classList.add("on");
+  scanBtn.textContent = "Stop"; scanBtn.classList.add("on");
 }
 function stopScan() {
   scan.on = false;
@@ -486,7 +486,7 @@ function stopScan() {
   holdAt(bass.g.gain, t); bass.g.gain.setTargetAtTime(0, t, 0.6);
   holdAt(bass.padG.gain, t); bass.padG.gain.setTargetAtTime(0, t, 0.6);
   scan.stopAt = performance.now();
-  scanBtn.textContent = "スキャン"; scanBtn.classList.remove("on");
+  scanBtn.textContent = "Scan"; scanBtn.classList.remove("on");
 }
 // 少し先までの刻みを、音の時計で予約していく（画面の動きに左右されず、リズムが揺れない）
 function scheduler() {
@@ -591,18 +591,18 @@ async function focusAt(cx, cy) {
   if (Object.keys(c).length) { try { await camTrack.applyConstraints({ advanced: [c] }); ok = true; } catch (_) {} }
   if (!ok) {
     ring.className = "show fail";
-    if (!focusNoticeShown) { focusNoticeShown = true; keyEl.dataset.note = "この端末のブラウザは焦点の指定に対応していません"; }
+    if (!focusNoticeShown) { focusNoticeShown = true; keyEl.dataset.note = "This browser can't set the focus point"; }
   }
   focusTimer = setTimeout(() => { ring.className = ""; delete keyEl.dataset.note; }, 900);
 }
 view.addEventListener("pointerup", e => { if (started) focusAt(e.clientX, e.clientY); });
 
 /* ---------- 操作 ---------- */
-const densText = x => x < 0.25 ? "まばら" : x < 0.6 ? "ふつう" : x < 0.85 ? "多め" : "ぎっしり";
-const updSpeed = () => { const d = passDur(); $("speedL").textContent = (d < 10 ? d.toFixed(1) : Math.round(d)) + "秒"; };
+const densText = x => x < 0.25 ? "Sparse" : x < 0.6 ? "Medium" : x < 0.85 ? "Busy" : "Packed";
+const updSpeed = () => { const d = passDur(); $("speedL").textContent = (d < 10 ? d.toFixed(1) : Math.round(d)) + " s"; };
 speedEl.addEventListener("input", updSpeed);
 densEl.addEventListener("input", () => { $("densL").textContent = densText(+densEl.value); });
-const susText = x => x < 0.15 ? "短い" : x < 0.45 ? "ふつう" : x < 0.8 ? "長い" : "ロングトーン";
+const susText = x => x < 0.15 ? "Short" : x < 0.45 ? "Medium" : x < 0.8 ? "Long" : "Drone";
 susEl.addEventListener("input", () => { $("susL").textContent = susText(+susEl.value); });
 revEl.addEventListener("input", () => {
   $("revL").textContent = Math.round(revEl.value * 100) + "%";
@@ -612,7 +612,7 @@ revEl.addEventListener("input", () => {
 $("dir").addEventListener("click", () => {
   dir = dir === "x" ? "y" : "x";
   $("dir").querySelector("b").textContent = dir === "x" ? "→" : "↓";
-  $("dir").querySelector("small").textContent = dir === "x" ? "横へ" : "下へ";
+  $("dir").querySelector("small").textContent = dir === "x" ? "across" : "down";
   if (scan.on) stopScan();
 });
 $("resSeg").addEventListener("click", e => {
@@ -626,13 +626,13 @@ $("bass").addEventListener("click", () => {
   bassMode = bassMode === "prog" ? "root" : "prog";
   const on = bassMode === "prog";
   $("bass").classList.toggle("on", on);
-  $("bass").querySelector("small").textContent = on ? "オン" : "オフ";
+  $("bass").querySelector("small").textContent = on ? "on" : "off";
 });
 scanBtn.addEventListener("click", () => (scan.on ? stopScan() : startScan()));
 loopBtn.addEventListener("click", () => {
   looping = !looping;
   loopBtn.classList.toggle("on", looping);
-  loopBtn.querySelector("small").textContent = looping ? "オン" : "オフ";
+  loopBtn.querySelector("small").textContent = looping ? "on" : "off";
 });
 addEventListener("keydown", e => {
   if (e.code === "Space" && started) { e.preventDefault(); scan.on ? stopScan() : startScan(); }
@@ -661,8 +661,8 @@ $("start").addEventListener("click", async () => {
     setInterval(scheduler, 25);
     requestAnimationFrame(render);
   } catch (err) {
-    $("msg").textContent = "カメラを開始できませんでした：" + (err && err.message || err) +
-      "（スマホでは https で開く必要があります）";
+    $("msg").textContent = "Couldn't start the camera: " + (err && err.message || err) +
+      " (on a phone, open the page over https)";
   }
 });
 })();
